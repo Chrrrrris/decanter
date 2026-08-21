@@ -122,6 +122,9 @@ The injection recovery and every null realization then use that fixed
 observed-data-selected rank; they do not repeat the component search.
 Test configurations default to five null realizations. Increase or decrease
 this with `injection.null_realizations` in the TOML file.
+Progress bars are enabled by default for template construction, SVD-rank
+search, injection recovery, and null realizations. Set the top-level TOML field
+`show_progress = false` to disable them in batch logs.
 By default the Kp grid spans zero to 1.5 times the expected Kp and the Vsys grid
 spans at least five times the absolute stellar systemic velocity in each
 direction. The output includes model, SVD-sequence, template-sequence,

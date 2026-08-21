@@ -50,6 +50,7 @@ wavecal = [
 ]
 hrccs = [
     "astroquery>=0.4.7",
+    "tqdm>=4.66",
     "jax>=0.4",
     "jaxlib>=0.4",
     "exojax>=2.2",

@@ -1,4 +1,5 @@
 output_dir = "hrccs_output/toi2109b"
+show_progress = true
 
 [input]
 decanter_dir = "../outputs/decanter_wavecal/toi2109b"

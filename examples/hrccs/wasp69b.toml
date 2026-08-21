@@ -1,4 +1,5 @@
 output_dir = "hrccs_output/wasp69b"
+show_progress = true
 
 [input]
 decanter_dir = "../outputs/decanter_wavecal/wasp69b"
@@ -34,7 +35,7 @@ local_kp_half_width_kms = 30.0
 local_vsys_half_width_kms = 15.0
 
 [injection]
-null_realizations = 5
+null_realizations = 2
 
 [plots]
 enabled = true

@@ -88,9 +88,22 @@ def run(config):
     prepared = prepare_cube(flux, config.reduction.continuum_percentile,
                             config.reduction.continuum_window_pixels)
     factory = TemplateFactory(config.system, config.atmosphere)
+    from tqdm.auto import tqdm
+
     results = []
-    for species_index, species in enumerate(config.atmosphere.species):
-        templates = [factory.build(species, wave) for wave in wavelength]
+    species_bar = tqdm(
+        config.atmosphere.species, desc="HRCCS species", unit="species",
+        disable=not config.show_progress, dynamic_ncols=True,
+    )
+    for species_index, species in enumerate(species_bar):
+        species_bar.set_postfix_str(str(species), refresh=False)
+        order_bar = tqdm(
+            wavelength, total=len(wavelength),
+            desc=f"{species} {config.atmosphere.backend} templates",
+            unit="order", leave=False, disable=not config.show_progress,
+            dynamic_ncols=True,
+        )
+        templates = [factory.build(species, wave) for wave in order_bar]
         contrast = np.asarray([template.contrast for template in templates])
         depths = np.asarray([template.transit_depth for template in templates])
         result = run_species(
@@ -101,7 +114,7 @@ def run(config):
             config.search.local_kp_half_width_kms,
             config.search.local_vsys_half_width_kms,
             config.injection.scale, config.injection.random_seed + species_index * 100_000,
-            config.injection.null_realizations,
+            config.injection.null_realizations, show_progress=config.show_progress,
         )
         results.append(result)
         _save_result(result, output, orbit, rv_grid, kp_grid, vsys_grid)

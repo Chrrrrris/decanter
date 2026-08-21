@@ -125,6 +125,7 @@ class HRCCSConfig:
     injection: InjectionConfig = field(default_factory=InjectionConfig)
     plots: PlotConfig = field(default_factory=PlotConfig)
     output_dir: str = "hrccs_output"
+    show_progress: bool = True
 
     def validate(self) -> None:
         if self.system.period_days <= 0 or self.system.transit_duration_hours <= 0:
@@ -173,7 +174,7 @@ def load_config(path: str | Path) -> HRCCSConfig:
     if missing:
         raise ValueError(f"missing config tables: {missing}")
     allowed = {"input", "system", "atmosphere", "reduction", "search",
-               "injection", "plots", "output_dir"}
+               "injection", "plots", "output_dir", "show_progress"}
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError(f"unknown top-level config fields: {unknown}")
@@ -186,6 +187,7 @@ def load_config(path: str | Path) -> HRCCSConfig:
         injection=_construct(InjectionConfig, raw.get("injection")),
         plots=_construct(PlotConfig, raw.get("plots")),
         output_dir=str(raw.get("output_dir", "hrccs_output")),
+        show_progress=bool(raw.get("show_progress", True)),
     )
     config.validate()
     return config

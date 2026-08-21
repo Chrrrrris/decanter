@@ -210,7 +210,16 @@ def _select_component(components):
 def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, berv_kms,
                 transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys,
                 counts, sigma_clip, local_kp_half_width, local_vsys_half_width,
-                injection_scale, seed, null_realizations):
+                injection_scale, seed, null_realizations, *, show_progress=True):
+    from tqdm.auto import tqdm
+
+    progress = tqdm(
+        total=len(counts) + 1 + null_realizations,
+        desc=f"{species} CCF/SVD",
+        unit="run",
+        disable=not show_progress,
+        dynamic_ncols=True,
+    )
     expected_model = planet_model_cube(
         wavelength_um, raw_templates, phase, berv_kms, expected_kp, expected_vsys,
         transit_weight, scale=injection_scale,
@@ -218,12 +227,14 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
     paths = _paths(prepared, mask, counts)
     components = []
     for count in counts:
+        progress.set_postfix_str(f"observed rank {count}", refresh=False)
         components.append(evaluate(
             count, _residual_cube(paths, count), _filtered_cube(expected_model, paths, count),
             wavelength_um, mask, phase, transit_weight, rv_grid, kp_grid, vsys_grid,
             expected_kp, expected_vsys, sigma_clip,
             local_kp_half_width, local_vsys_half_width,
         ))
+        progress.update()
     selected = _select_component(components)
 
     oot = transit_weight <= 0
@@ -249,14 +260,19 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
 
     injected_data = synthetic(expected_model, seed)
     injected_paths = _paths(injected_data, mask, (selected.count,))
+    progress.set_postfix_str(f"injection rank {selected.count}", refresh=False)
     injected = evaluate(
         selected.count, _residual_cube(injected_paths, selected.count),
         _filtered_cube(expected_model, injected_paths, selected.count), wavelength_um, mask,
         phase, transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys, sigma_clip,
         local_kp_half_width, local_vsys_half_width,
     )
+    progress.update()
     null_maps, null_expected, null_local = [], [], []
     for index in range(null_realizations):
+        progress.set_postfix_str(
+            f"null {index + 1}/{null_realizations}, rank {selected.count}", refresh=False
+        )
         null_data = synthetic(np.zeros_like(expected_model), seed + 1000 + index)
         null_paths = _paths(null_data, mask, (selected.count,))
         null = evaluate(
@@ -271,10 +287,13 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
         null_maps.append(null.snr_map)
         null_expected.append(null.expected_snr)
         null_local.append(null.local_peak_snr)
+        progress.update()
     null_expected = np.asarray(null_expected)
     null_local = np.asarray(null_local)
     fap = float((1 + np.count_nonzero(null_local >= selected.local_peak_snr)) /
                 (1 + null_local.size))
+    progress.set_postfix_str(f"selected rank {selected.count}", refresh=False)
+    progress.close()
     return SpeciesResult(species, raw_templates, expected_model, mask, paths,
                          tuple(components), selected, injected,
                          np.nanmean(null_maps, axis=0), null_expected, null_local, fap)

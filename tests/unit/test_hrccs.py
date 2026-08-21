@@ -76,6 +76,7 @@ def test_default_search_grids_and_local_window():
     assert config.search.local_kp_half_width_kms == 30.0
     assert config.search.local_vsys_half_width_kms == 15.0
     assert InjectionConfig().null_realizations == 5
+    assert config.show_progress is True
 
 
 def test_search_grid_steps_must_be_positive():
