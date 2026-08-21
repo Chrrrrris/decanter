@@ -40,11 +40,33 @@ def _download(url: str, path: Path) -> Path:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".part")
+    from tqdm.auto import tqdm
+
+    terminal = sys.__stderr__ or sys.stderr
+    progress = tqdm(
+        desc=f"Downloading {path.name}", unit="B", unit_scale=True,
+        unit_divisor=1024, dynamic_ncols=True, leave=True, file=terminal,
+    )
+    last_bytes = 0
+
+    def report(block_count, block_size, total_size):
+        nonlocal last_bytes
+        if total_size > 0 and progress.total is None:
+            progress.total = total_size
+        downloaded = block_count * block_size
+        progress.update(max(0, downloaded - last_bytes))
+        last_bytes = downloaded
+
     try:
-        urllib.request.urlretrieve(url, temporary)  # noqa: S310 - fixed scientific archives
+        tqdm.write(f"Downloading {url} -> {path}", file=terminal)
+        urllib.request.urlretrieve(  # noqa: S310 - fixed scientific archives
+            url, temporary, reporthook=report,
+        )
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+    finally:
+        progress.close()
     temporary.replace(path)
     return path
 
@@ -121,11 +143,14 @@ def _equilibrium_profiles_local(config, metallicity_dex: float, pressure_bar: np
 def equilibrium_profiles(config, metallicity_dex: float, pressure_bar: np.ndarray,
                          temperature_k: np.ndarray, species: tuple[str, ...]):
     """Run FastChem outside the ExoJAX process to isolate OpenMP runtimes."""
+    # Resolve/download the small FastChem inputs in the parent so download
+    # progress remains visible instead of being trapped in worker stderr.
+    abundance_path, logk_path = _fastchem_files(config)
     payload = {
         "config": {
             "cache_dir": str(config.cache_dir),
-            "fastchem_abundance_file": config.fastchem_abundance_file,
-            "fastchem_logk_file": config.fastchem_logk_file,
+            "fastchem_abundance_file": str(abundance_path),
+            "fastchem_logk_file": str(logk_path),
         },
         "metallicity_dex": float(metallicity_dex),
         "species": list(species),
@@ -264,6 +289,15 @@ def _sample_instrument(nu, values, wavelength_um, resolving_power):
     return np.asarray(sampled)[::-1]
 
 
+def _cia_supported_indices(nu, cia_nu):
+    """Indices strictly inside a CIA table's interpolation support."""
+    values = np.asarray(nu)
+    support = np.asarray(cia_nu)
+    if support.size < 2:
+        return np.empty(0, dtype=int)
+    return np.flatnonzero((values >= support[0]) & (values < support[-1]))
+
+
 class TemplateFactory:
     def __init__(self, system, atmosphere, *, instmode: str | None = None):
         self.system = system
@@ -279,6 +313,19 @@ class TemplateFactory:
             self.cache.mkdir(parents=True, exist_ok=True)
             self.config = replace(atmosphere, cache_dir=str(self.cache))
         self._chemistry = {}
+        self._cia_databases = {}
+
+    def _cia_database(self, filename):
+        """Load each large HITRAN CIA table once for all per-order models."""
+        from exojax.database.cia.api import CdbCIA
+        from exojax.utils.url import url_HITRANCIA
+
+        if filename not in self._cia_databases:
+            cia_root = (Path(self.config.cia_dir).expanduser()
+                        if self.config.cia_dir else self.cache / "cia")
+            cia_path = _download(f"{url_HITRANCIA()}{filename}", cia_root / filename)
+            self._cia_databases[filename] = CdbCIA(str(cia_path), margin=0.0)
+        return self._cia_databases[filename]
 
     def _key(self, species, wave):
         payload = {
@@ -395,6 +442,12 @@ class TemplateFactory:
             hitran_root = (Path(self.config.hitran_dir).expanduser()
                            if self.config.hitran_dir else self.cache / "hitran")
             path = hitran_root / database_path_hitran12(species)
+            if not path.exists():
+                from tqdm.auto import tqdm
+                tqdm.write(
+                    f"Downloading HITRAN line data for {species} via ExoJAX -> {path}",
+                    file=sys.__stderr__ or sys.stderr,
+                )
             path.parent.mkdir(parents=True, exist_ok=True)
             mdb = MdbHitran(path, nurange=[nu_min, nu_max], isotope=self.config.hitran_isotope,
                             gpu_transfer=False, inherit_dataframe=False,
@@ -413,6 +466,7 @@ class TemplateFactory:
         molecular_dtau = art.opacity_profile_xs(xs, species_mmr, molmass, gravity)
 
         continuum = jnp.zeros_like(molecular_dtau)
+        cia_coverage = {}
         if self.config.include_rayleigh:
             for molecule, mass in (("H2", 2.01588), ("He", 4.002602)):
                 rayleigh = OpaRayleigh(nu, molecule).xsvector()
@@ -420,23 +474,28 @@ class TemplateFactory:
                     rayleigh, jnp.asarray(vmr[molecule] * mass / mmw_np), mass, gravity
                 )
         if self.config.include_cia:
-            from exojax.database.cia.api import CdbCIA
-            from exojax.utils.url import url_HITRANCIA
-            cia_root = (Path(self.config.cia_dir).expanduser()
-                        if self.config.cia_dir else self.cache / "cia")
             for filename, first, second in (
                 ("H2-H2_2011.cia", "H2", "H2"),
                 ("H2-He_2011.cia", "H2", "He"),
             ):
-                # Use ExoJAX's version-matched archive root. HITRAN moved the
-                # files under /CIA/main/, making the former hard-coded URL 404.
-                cia_path = _download(f"{url_HITRANCIA()}{filename}", cia_root / filename)
-                opa_cia = OpaCIA(CdbCIA(str(cia_path), nurange=nu), nu_grid=nu)
-                continuum += art.opacity_profile_cia(
+                cdb = self._cia_database(filename)
+                nu_values = np.asarray(nu)
+                # HITRAN CIA pairs do not all span the complete WINERED range
+                # (H2-H2 ends at 10,000 cm^-1). ExoJAX's interpolator cannot
+                # extrapolate and indexes past the table at its upper edge.
+                # Evaluate only on supported samples and leave the unavailable
+                # contribution at zero elsewhere.
+                indices = _cia_supported_indices(nu_values, cdb.nucia)
+                cia_coverage[filename] = float(indices.size / nu_values.size)
+                if indices.size == 0:
+                    continue
+                opa_cia = OpaCIA(cdb, nu_grid=nu[indices])
+                contribution = art.opacity_profile_cia(
                     opa_cia.logacia_matrix(temperature), temperature,
                     jnp.asarray(vmr[first]), jnp.asarray(vmr[second]),
                     mmw[:, None], gravity,
                 )
+                continuum = continuum.at[:, indices].add(contribution)
         if self.config.cloud_top_pressure_bar is not None:
             cloudy = jnp.asarray(np.asarray(art.pressure) >= self.config.cloud_top_pressure_bar)
             continuum += jnp.where(cloudy[:, None], 1.0e6, 0.0)
@@ -455,6 +514,7 @@ class TemplateFactory:
                 "sampling": "Gaussian LSF then sampled onto this order wavelength grid",
                 "continuum": {"rayleigh": self.config.include_rayleigh,
                               "cia": self.config.include_cia,
+                              "cia_grid_coverage": cia_coverage,
                               "cloud_top_pressure_bar": self.config.cloud_top_pressure_bar},
                 "baseline_transit_depth": baseline}
         return Template(species, wave, depth, contrast, meta)

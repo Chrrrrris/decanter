@@ -15,7 +15,11 @@ from decanter.hrccs.config import (
     SearchConfig,
     SystemConfig,
 )
-from decanter.hrccs.models import TemplateFactory, _sample_instrument
+from decanter.hrccs.models import (
+    TemplateFactory,
+    _cia_supported_indices,
+    _sample_instrument,
+)
 from decanter.wavecal.products import telluric_product
 
 
@@ -147,6 +151,13 @@ def test_exojax_instrument_sampling_has_requested_resolution(resolution):
                      - velocity[above_half_maximum[0]])
     expected_fwhm = speed_of_light_kms / resolution
     assert measured_fwhm == pytest.approx(expected_fwhm, rel=0.03)
+
+
+def test_cia_support_excludes_unavailable_and_upper_edge_samples():
+    model_nu = np.array([9_998.0, 9_999.0, 10_000.0, 10_001.0])
+    cia_nu = np.arange(20.0, 10_001.0)
+    np.testing.assert_array_equal(_cia_supported_indices(model_nu, cia_nu), [0, 1])
+    assert _cia_supported_indices(model_nu, np.array([])).size == 0
 
 
 def test_wavecal_telluric_product_is_continuous_and_unthresholded(tmp_path):
