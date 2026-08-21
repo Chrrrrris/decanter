@@ -35,7 +35,7 @@ local_kp_half_width_kms = 30.0
 local_vsys_half_width_kms = 15.0
 
 [injection]
-null_realizations = 2
+null_realizations = 5
 
 [plots]
 enabled = true

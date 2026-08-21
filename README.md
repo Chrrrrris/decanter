@@ -115,13 +115,20 @@ First use may download them into `atmosphere.cache_dir`. The optional
 fields point to existing shared line-list and collision-induced-absorption
 caches.
 
-Templates remain per order. Each one is convolved with a Gaussian instrument
-profile and then sampled directly onto that order's calibrated wavelength
-grid. Unless `[atmosphere].resolving_power` is set explicitly, the pipeline
-reads `INSTMODE` from the Decanter products and uses the WINERED nominal
-resolution: `R=28,000` for WIDE and `R=68,000` for HIRES-Y/HIRES-J. The resolved
-mode and resolution are recorded in every template cache entry and in
-`summary.json`.
+For each species, the pipeline constructs one wide atmospheric model spanning
+all retained orders, convolves it with the mode-specific Gaussian instrument
+profile, and samples it on a log-wavelength grid with five points per
+resolution FWHM. It then interpolates that common model onto each calibrated
+order grid for the CCF analysis. Unless `[atmosphere].resolving_power` is set
+explicitly, the pipeline reads `INSTMODE` from the Decanter products and uses
+the WINERED nominal resolution: `R=28,000` for WIDE and `R=68,000` for
+HIRES-Y/HIRES-J. The resolved mode and resolution are recorded in every
+template and in `summary.json`.
+The wide template is internally evaluated in bounded-memory chunks and only
+the stitched wide product is cached. The defaults are 6,000 target-grid points
+per molecular chunk and 2,000 per atomic chunk; lower
+`atmosphere.wide_model_chunk_points` or
+`atmosphere.atomic_wide_model_chunk_points` if memory is constrained.
 
 The searched SVD rank is selected by the largest map S/N inside the configured
 local window around the expected planet location. The exact expected-cell value

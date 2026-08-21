@@ -98,16 +98,12 @@ def run(config):
         disable=not config.show_progress, dynamic_ncols=True,
     )
     for species_index, species in enumerate(species_bar):
-        species_bar.set_postfix_str(str(species), refresh=False)
-        order_bar = tqdm(
-            wavelength, total=len(wavelength),
-            desc=f"{species} {config.atmosphere.backend} templates",
-            unit="order", leave=False, disable=not config.show_progress,
-            dynamic_ncols=True,
+        species_bar.set_postfix_str(f"{species}: wide template", refresh=True)
+        wide_template = factory.build_wide(
+            species, wavelength, show_progress=config.show_progress,
         )
-        # Deliberately retain the per-order convention: each order gets its own
-        # line selection, Gaussian LSF convolution, and native-grid sampling.
-        templates = [factory.build(species, wave) for wave in order_bar]
+        templates = factory.sample_orders(wide_template, wavelength)
+        species_bar.set_postfix_str(f"{species}: CCF/SVD", refresh=True)
         for template, wave in zip(templates, wavelength):
             if template.metadata.get("resolving_power") != resolving_power:
                 raise RuntimeError("cached template has the wrong instrumental resolution")

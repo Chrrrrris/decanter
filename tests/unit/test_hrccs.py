@@ -18,7 +18,9 @@ from decanter.hrccs.config import (
 from decanter.hrccs.models import (
     TemplateFactory,
     _cia_supported_indices,
+    _is_atomic,
     _sample_instrument,
+    _wide_wavelength_grid,
 )
 from decanter.wavecal.products import telluric_product
 
@@ -99,6 +101,8 @@ def test_search_grid_steps_must_be_positive():
         replace(config, search=SearchConfig(kp_step_kms=0.0)).validate()
     with pytest.raises(ValueError, match="null_realizations"):
         replace(config, injection=InjectionConfig(null_realizations=0)).validate()
+    with pytest.raises(ValueError, match="wide_model_chunk_points"):
+        replace(config, atmosphere=AtmosphereConfig(wide_model_chunk_points=255)).validate()
 
 
 @pytest.mark.parametrize(
@@ -119,7 +123,7 @@ def test_explicit_template_resolution_overrides_mode():
 
 @pytest.mark.parametrize(("mode", "resolution"), [("WIDE", 28_000.0),
                                                     ("HIRES-Y", 68_000.0)])
-def test_per_order_template_records_native_grid_and_resolution(tmp_path, mode, resolution):
+def test_wide_template_is_built_once_then_sampled_per_order(tmp_path, mode, resolution):
     atmosphere = AtmosphereConfig(
         backend="analytic", cache_dir=str(tmp_path), resolving_power=resolution,
     )
@@ -127,13 +131,26 @@ def test_per_order_template_records_native_grid_and_resolution(tmp_path, mode, r
     factory = TemplateFactory(system, atmosphere, instmode=mode)
     first_wave = np.linspace(1.10, 1.11, 128)
     second_wave = np.linspace(1.20, 1.21, 96)
-    first = factory.build("H2O", first_wave)
-    second = factory.build("H2O", second_wave)
+    wide = factory.build_wide("H2O", [first_wave, second_wave])
+    first, second = factory.sample_orders(wide, [first_wave, second_wave])
     np.testing.assert_array_equal(first.wavelength_um, first_wave)
     np.testing.assert_array_equal(second.wavelength_um, second_wave)
     assert first.wavelength_um.size != second.wavelength_um.size
     assert first.metadata["instrument_mode"] == mode
     assert first.metadata["resolving_power"] == resolution
+    assert first.metadata["model_scope"] == "single wide-band template"
+    assert first.metadata["wide_model_chunks"] > 1
+    assert len(list((tmp_path / "templates").glob("H2O_*.npz"))) == 1
+
+
+@pytest.mark.parametrize("resolution", [28_000.0, 68_000.0])
+def test_wide_grid_oversamples_instrument_resolution(resolution):
+    orders = np.array([np.linspace(0.95, 1.05, 100), np.linspace(1.20, 1.30, 100)])
+    wave = _wide_wavelength_grid(orders, resolution)
+    samples_per_fwhm = 1.0 / (resolution * np.max(np.diff(np.log(wave))))
+    assert samples_per_fwhm >= 4.99
+    assert wave[0] == pytest.approx(0.95)
+    assert wave[-1] == pytest.approx(1.30)
 
 
 @pytest.mark.parametrize("resolution", [28_000.0, 68_000.0])
@@ -158,6 +175,14 @@ def test_cia_support_excludes_unavailable_and_upper_edge_samples():
     cia_nu = np.arange(20.0, 10_001.0)
     np.testing.assert_array_equal(_cia_supported_indices(model_nu, cia_nu), [0, 1])
     assert _cia_supported_indices(model_nu, np.array([])).size == 0
+
+
+def test_atomic_classifier_does_not_misclassify_diatomic_molecules():
+    assert _is_atomic("Fe")
+    assert _is_atomic("Na+")
+    assert not _is_atomic("OH")
+    assert not _is_atomic("CO")
+    assert not _is_atomic("H2O")
 
 
 def test_wavecal_telluric_product_is_continuous_and_unthresholded(tmp_path):

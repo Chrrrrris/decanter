@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -202,8 +204,9 @@ def equilibrium_profiles(config, metallicity_dex: float, pressure_bar: np.ndarra
 
 
 def _is_atomic(species: str) -> bool:
-    bare = species.replace("+", "")
-    return bare.isalpha() and len(bare) <= 2 and bare[0].isupper()
+    # Element symbols contain one capital followed by at most one lowercase
+    # letter. Uppercase diatomics such as OH, CO, and NO are molecules.
+    return re.fullmatch(r"[A-Z][a-z]?\+*", species) is not None
 
 
 def _atomic_parts(species: str) -> tuple[str, int]:
@@ -273,7 +276,9 @@ def _kurucz_path(species: str, root: Path) -> Path:
         raise ValueError(f"unknown atomic symbol {symbol!r}")
     filename = f"gf{int(matches[0]):02d}{ion - 1:02d}.all"
     return _download(
-        f"https://kurucz.harvard.edu/linelists/gfall/{filename}", root / filename
+        # The official archive currently serves a mismatched TLS certificate
+        # on this hostname, while its HTTP endpoint remains available.
+        f"http://kurucz.harvard.edu/linelists/gfall/{filename}", root / filename
     )
 
 
@@ -296,6 +301,22 @@ def _cia_supported_indices(nu, cia_nu):
     if support.size < 2:
         return np.empty(0, dtype=int)
     return np.flatnonzero((values >= support[0]) & (values < support[-1]))
+
+
+def _wide_wavelength_grid(order_wavelengths, resolving_power, samples_per_fwhm=5.0):
+    """Oversampled log-lambda grid spanning every retained echelle order."""
+    parts = [np.asarray(order, dtype=float).ravel() for order in order_wavelengths]
+    finite = np.concatenate([
+        part[np.isfinite(part) & (part > 0)] for part in parts if part.size
+    ])
+    if finite.size < 2:
+        raise ValueError("cannot construct a wide template from fewer than two wavelengths")
+    lower, upper = float(np.min(finite)), float(np.max(finite))
+    samples = max(
+        2,
+        int(np.ceil(samples_per_fwhm * resolving_power * np.log(upper / lower))) + 1,
+    )
+    return np.geomspace(lower, upper, samples)
 
 
 class TemplateFactory:
@@ -329,46 +350,163 @@ class TemplateFactory:
 
     def _key(self, species, wave):
         payload = {
-            "schema": 2, "species": species, "instmode": self.instmode,
+            "schema": 4, "species": species, "instmode": self.instmode,
             "wave": [round(float(wave[0]), 8), round(float(wave[-1]), 8), len(wave)],
             "system": vars(self.system), "atmosphere": vars(self.config),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:20]
 
-    def build(self, species: str, wavelength_um: np.ndarray) -> Template:
-        wave = np.asarray(wavelength_um, dtype=float)
-        path = self.cache / "templates" / f"{species.replace('+', 'p')}_{self._key(species, wave)}.npz"
-        if path.exists():
-            with np.load(path, allow_pickle=False) as data:
-                return Template(species, data["wavelength_um"], data["transit_depth"],
-                                data["contrast"], json.loads(str(data["metadata_json"])))
-        if self.config.backend == "analytic":
-            template = self._analytic(species, wave)
-        elif self.config.backend == "exojax":
-            if self.config.model_verbose:
-                template = self._exojax(species, wave)
-            else:
-                captured_stdout, captured_stderr = io.StringIO(), io.StringIO()
-                try:
-                    with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr), \
-                            warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", module=r"exojax\..*")
-                        template = self._exojax(species, wave)
-                except Exception as exc:
-                    details = "\n".join(
-                        value.strip() for value in (
-                            captured_stdout.getvalue(), captured_stderr.getvalue()
-                        ) if value.strip()
-                    )
-                    suffix = f"\nCaptured model output:\n{details}" if details else ""
-                    raise RuntimeError(f"ExoJAX template failed for {species}: {exc}{suffix}") from exc
-        else:
-            raise ValueError(f"unknown atmosphere backend {self.config.backend!r}")
+    def _path(self, species, wave):
+        return (self.cache / "templates"
+                / f"{species.replace('+', 'p')}_{self._key(species, wave)}.npz")
+
+    @staticmethod
+    def _load(path, species):
+        with np.load(path, allow_pickle=False) as data:
+            return Template(species, data["wavelength_um"], data["transit_depth"],
+                            data["contrast"], json.loads(str(data["metadata_json"])))
+
+    @staticmethod
+    def _save(path, template):
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(path, wavelength_um=template.wavelength_um,
-                            transit_depth=template.transit_depth, contrast=template.contrast,
-                            metadata_json=np.asarray(json.dumps(template.metadata, sort_keys=True)))
+        np.savez_compressed(
+            path, wavelength_um=template.wavelength_um,
+            transit_depth=template.transit_depth, contrast=template.contrast,
+            metadata_json=np.asarray(json.dumps(template.metadata, sort_keys=True)),
+        )
+
+    def _compute(self, species, wave):
+        if self.config.backend == "analytic":
+            return self._analytic(species, wave)
+        if self.config.backend != "exojax":
+            raise ValueError(f"unknown atmosphere backend {self.config.backend!r}")
+        if self.config.model_verbose:
+            return self._exojax(species, wave)
+        captured_stdout, captured_stderr = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr), \
+                    warnings.catch_warnings():
+                warnings.filterwarnings("ignore", module=r"exojax\..*")
+                return self._exojax(species, wave)
+        except Exception as exc:
+            details = "\n".join(
+                value.strip() for value in (
+                    captured_stdout.getvalue(), captured_stderr.getvalue()
+                ) if value.strip()
+            )
+            suffix = f"\nCaptured model output:\n{details}" if details else ""
+            raise RuntimeError(f"ExoJAX template failed for {species}: {exc}{suffix}") from exc
+
+    def build_wide(self, species: str, order_wavelengths: np.ndarray,
+                   *, show_progress: bool = True) -> Template:
+        """Build one wide model using bounded-memory internal calculations."""
+        wave = _wide_wavelength_grid(
+            order_wavelengths, float(self.config.resolving_power), samples_per_fwhm=5.0,
+        )
+        path = self._path(species, wave)
+        if path.exists():
+            cached = self._load(path, species)
+            if (np.all(np.isfinite(cached.contrast))
+                    and np.ptp(cached.contrast) > 0.0):
+                return cached
+        chunk_points = int(
+            self.config.atomic_wide_model_chunk_points if _is_atomic(species)
+            else self.config.wide_model_chunk_points
+        )
+        starts = list(range(0, wave.size, chunk_points))
+        if len(starts) > 1 and wave.size - starts[-1] < 2:
+            starts.pop()
+        from tqdm.auto import tqdm
+        pieces = []
+        chunk_bar = tqdm(
+            starts, desc=f"{species} wide-model chunks", unit="chunk", leave=False,
+            disable=not show_progress, dynamic_ncols=True,
+        )
+        for chunk_index, start in enumerate(chunk_bar):
+            stop = starts[chunk_index + 1] if chunk_index + 1 < len(starts) else wave.size
+            pieces.append(self._compute(species, wave[start:stop]))
+            # JAX retains compiled executables and device buffers by shape.
+            # Clear between chunks so peak memory is bounded for atomic LPF.
+            if self.config.backend == "exojax" and _is_atomic(species):
+                import jax
+                jax.clear_caches()
+            gc.collect()
+        template = self._stitch_wide(species, wave, pieces, chunk_points)
+        self._save(path, template)
         return template
+
+    def _stitch_wide(self, species, wave, pieces, chunk_points):
+        """Combine bounded calculations into the sole wide template product."""
+        if not pieces:
+            raise RuntimeError(f"no wide-template chunks were computed for {species}")
+        metadata = dict(pieces[0].metadata)
+        line_counts = [int(piece.metadata.get("line_count", 0)) for piece in pieces]
+        coverage = {}
+        for filename in ("H2-H2_2011.cia", "H2-He_2011.cia"):
+            weighted = [
+                (len(piece.wavelength_um),
+                 piece.metadata.get("continuum", {}).get("cia_grid_coverage", {}).get(filename))
+                for piece in pieces
+            ]
+            valid = [(size, value) for size, value in weighted if value is not None]
+            if valid:
+                coverage[filename] = float(
+                    sum(size * value for size, value in valid) / sum(size for size, _ in valid)
+                )
+        metadata.update({
+            "line_count": int(sum(line_counts)),
+            "line_count_note": "sum over bounded wavelength chunks",
+            "model_scope": "single wide-band template",
+            "wide_wavelength_min_um": float(wave[0]),
+            "wide_wavelength_max_um": float(wave[-1]),
+            "wide_grid_points": int(wave.size),
+            "wide_samples_per_resolution_fwhm": 5.0,
+            "wide_model_chunks": len(pieces),
+            "wide_model_chunk_points": chunk_points,
+        })
+        metadata.setdefault("continuum", {})["cia_grid_coverage"] = coverage
+        return Template(
+            species, wave,
+            np.concatenate([piece.transit_depth for piece in pieces]),
+            np.concatenate([piece.contrast for piece in pieces]),
+            metadata,
+        )
+
+    def build(self, species: str, wavelength_um: np.ndarray) -> Template:
+        """Build/cache a model directly on one requested grid."""
+        wave = np.asarray(wavelength_um, dtype=float)
+        path = self._path(species, wave)
+        if path.exists():
+            return self._load(path, species)
+        template = self._compute(species, wave)
+        self._save(path, template)
+        return template
+
+    @staticmethod
+    def sample_orders(wide_template: Template,
+                      order_wavelengths: np.ndarray) -> tuple[Template, ...]:
+        """Interpolate one instrument-convolved wide template to native orders."""
+        result = []
+        wide_wave = np.asarray(wide_template.wavelength_um, dtype=float)
+        for order_index, values in enumerate(order_wavelengths):
+            wavelength = np.asarray(values, dtype=float)
+            if (np.nanmin(wavelength) < wide_wave[0]
+                    or np.nanmax(wavelength) > wide_wave[-1]):
+                raise ValueError(f"order {order_index} lies outside the wide template")
+            metadata = dict(wide_template.metadata)
+            metadata.update({
+                "sampling": "wide instrument-convolved template interpolated to order grid",
+                "sampled_order_index": order_index,
+                "sampled_order_points": int(wavelength.size),
+            })
+            result.append(Template(
+                wide_template.species,
+                np.asarray(wavelength, dtype=float).copy(),
+                np.interp(wavelength, wide_wave, wide_template.transit_depth),
+                np.interp(wavelength, wide_wave, wide_template.contrast),
+                metadata,
+            ))
+        return tuple(result)
 
     def _analytic(self, species, wave):
         # Deterministic smoke-test backend; production defaults to ExoJAX.
@@ -384,7 +522,7 @@ class TemplateFactory:
                         {"backend": "analytic_test_only",
                          "instrument_mode": self.instmode,
                          "resolving_power": float(self.config.resolving_power),
-                         "sampling": "native per-order wavelength grid"})
+                         "sampling": "requested wavelength grid"})
 
     def _exojax(self, species, wave):
         import jax.numpy as jnp
@@ -442,7 +580,8 @@ class TemplateFactory:
             hitran_root = (Path(self.config.hitran_dir).expanduser()
                            if self.config.hitran_dir else self.cache / "hitran")
             path = hitran_root / database_path_hitran12(species)
-            if not path.exists():
+            cached_tables = tuple(path.parent.glob("*.hdf5")) if path.parent.exists() else ()
+            if not path.exists() and not cached_tables:
                 from tqdm.auto import tqdm
                 tqdm.write(
                     f"Downloading HITRAN line data for {species} via ExoJAX -> {path}",
@@ -502,16 +641,35 @@ class TemplateFactory:
         baseline = (radius / stellar_radius) ** 2
         def absolute(dtau):
             return np.asarray(art.run(dtau, temperature, mmw, radius, gravity_btm)) * baseline
-        high_depth = absolute(molecular_dtau + continuum)
         high_continuum = absolute(continuum)
-        depth = _sample_instrument(nu, high_depth, wave, self.config.resolving_power)
-        cont = _sample_instrument(nu, high_continuum, wave, self.config.resolving_power)
-        contrast = -(depth - cont)
+        # Subtracting two ~percent-level float32 transit depths can erase a
+        # weak equilibrium species entirely (e.g. OH near 960 K). Evaluate the
+        # smallest opacity boost that gives a numerically resolved differential
+        # signal, then scale that optically-thin differential back down. Strong
+        # templates use scale=1 and are unchanged.
+        opacity_boost = 1.0
+        high_delta = np.zeros_like(high_continuum)
+        for candidate in (1.0, 1.0e2, 1.0e4, 1.0e6, 1.0e8, 1.0e10, 1.0e12):
+            boosted = absolute(candidate * molecular_dtau + continuum)
+            trial = boosted - high_continuum
+            opacity_boost = candidate
+            high_delta = trial / candidate
+            if np.ptp(trial) >= 1.0e-5:
+                break
+        sampled_delta = np.asarray(_sample_instrument(
+            nu, high_delta, wave, self.config.resolving_power
+        ), dtype=np.float64)
+        cont = np.asarray(_sample_instrument(
+            nu, high_continuum, wave, self.config.resolving_power
+        ), dtype=np.float64)
+        depth = cont + sampled_delta
+        contrast = -sampled_delta
         meta = {"backend": "exojax", "source": source, "line_count": line_count,
                 "opa_resolution": float(opa_resolution), "chemistry": chemistry,
                 "instrument_mode": self.instmode,
                 "resolving_power": float(self.config.resolving_power),
-                "sampling": "Gaussian LSF then sampled onto this order wavelength grid",
+                "sampling": "Gaussian LSF then sampled onto requested wavelength grid",
+                "numerical_opacity_boost": opacity_boost,
                 "continuum": {"rayleigh": self.config.include_rayleigh,
                               "cia": self.config.include_cia,
                               "cia_grid_coverage": cia_coverage,

@@ -66,6 +66,10 @@ class AtmosphereConfig:
     # None selects the nominal resolving power from the Decanter INSTMODE.
     # An explicit value remains available for non-standard slits/configurations.
     resolving_power: float | None = None
+    # Bound the target-grid size of each internal opacity calculation. Chunks
+    # are stitched into one wide template before any order is sampled.
+    wide_model_chunk_points: int = 6_000
+    atomic_wide_model_chunk_points: int = 2_000
     line_strength_crit: float = 1.0e-30
     kurucz_line_strength_crit: float = 0.0
     hitran_isotope: int = 1
@@ -159,6 +163,10 @@ class HRCCSConfig:
         if (self.atmosphere.resolving_power is not None
                 and self.atmosphere.resolving_power <= 0):
             raise ValueError("atmosphere resolving_power must be positive")
+        if self.atmosphere.wide_model_chunk_points < 256:
+            raise ValueError("atmosphere wide_model_chunk_points must be at least 256")
+        if self.atmosphere.atomic_wide_model_chunk_points < 256:
+            raise ValueError("atmosphere atomic_wide_model_chunk_points must be at least 256")
         counts = self.reduction.svd_components
         if not counts or min(counts) < 0 or len(set(counts)) != len(counts):
             raise ValueError("svd_components must be unique non-negative integers")
