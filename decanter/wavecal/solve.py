@@ -57,6 +57,7 @@ class WavecalRun:
     oh_accepted: NDArray
     oh_information: NDArray
     smooth_velocity: NDArray
+    _telluric_tau: NDArray | None = None
 
 
 def _normalized(series) -> NDArray:
@@ -635,5 +636,6 @@ def solve(series, config: WavecalConfig | None = None, *, verbose: bool = True,
             oh_accepted=oh_accepted,
             oh_information=oh_information,
             smooth_velocity=smooth,
+            _telluric_tau=tau,
         )
     return solution

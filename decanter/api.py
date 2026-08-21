@@ -487,6 +487,7 @@ class TransitSeries:
     shifts: NDArray
     refid: int
     wavecal_solution: WavecalSolution | None = None
+    wavecal_run: Any | None = None
 
     def write_to(
         self,
@@ -535,6 +536,10 @@ class TransitSeries:
         )
         if self.wavecal_solution is not None:
             self.wavecal_solution.save_npz(root / "wavecal_solution.npz")
+        if self.wavecal_run is not None and self.wavecal_run.telluric_model is not None:
+            from decanter.wavecal.products import telluric_product
+
+            telluric_product(self.wavecal_run, root / "telluric_transmission.npz")
 
 
 def calibrate_wavelengths(
@@ -563,21 +568,26 @@ def calibrate_wavelengths(
     cfg = config or WavecalConfig()
     reference = from_reductions(series.reductions, fsr_cut=cfg.fsr_cut)
     cfg = cfg.resolved_for(reference.instmode)
-    if diagnostic_pdf is None:
-        solution = solve(reference, cfg, verbose=verbose, diagnostic_pdf=None)
+    import inspect
+
+    run = None
+    if "return_diagnostics" in inspect.signature(solve).parameters:
+        run = solve(reference, cfg, verbose=verbose, return_diagnostics=True)
+        solution = run.solution
     else:
+        solution = solve(reference, cfg, verbose=verbose, diagnostic_pdf=None)
+    if diagnostic_pdf is not None:
         from decanter.wavecal.report import wavecal_report_pdf
 
-        run = solve(reference, cfg, verbose=verbose, return_diagnostics=True)
         label = series.reductions[0].obj_name if series.reductions else "dataset"
         wavecal_report_pdf(run, diagnostic_pdf, dataset=label)
-        solution = run.solution
     corrected = solution.apply_many(series.reductions)
     return TransitSeries(
         reductions=corrected,
         shifts=series.shifts,
         refid=series.refid,
         wavecal_solution=solution,
+        wavecal_run=run,
     )
 
 

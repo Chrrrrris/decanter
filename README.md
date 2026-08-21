@@ -91,5 +91,49 @@ All four concrete modes remain selectable with `--mode`: `oh_static`,
 `oh_refit`, `hybrid_static`, and `hybrid_refit`. See
 `examples/run_wavecal_three_datasets.sh` for a complete three-dataset loop.
 
+## Downstream HRCCS
+
+Install the optional atmosphere and catalog dependencies, then run the
+configuration-driven pipeline on a wavelength-calibrated Decanter directory:
+
+```bash
+pip install -e '.[wavecal,hrccs]'
+decanter-hrccs examples/hrccs/wasp69b.toml
+```
+
+The pipeline reads the calibrated spectra and `telluric_transmission.npz`
+written by the upstream reduction. The transmission product is continuous;
+`telluric_threshold` is applied only downstream, so the mask can be changed
+without repeating the reduction. Older Decanter products without this file can
+still run, but no telluric pixels are masked.
+
+The production atmosphere backend is ExoJAX. It obtains molecular lines through
+the ExoJAX HITRAN interface, atomic lines from Kurucz, and equilibrium abundances
+from FastChem. The raw-data directory does not need any of these databases.
+First use may download them into `atmosphere.cache_dir`. The optional
+`atmosphere.hitran_dir`, `atmosphere.cia_dir`, and `atmosphere.kurucz_dir`
+fields point to existing shared line-list and collision-induced-absorption
+caches.
+
+The searched SVD rank is selected by the largest map S/N inside the configured
+local window around the expected planet location. The exact expected-cell value
+and unrestricted global maximum are also recorded, but do not select the rank.
+Null realizations repeat that rank search when estimating the false-alarm
+fraction, while the displayed null map uses the observed rank for an
+apples-to-apples comparison.
+By default the Kp grid spans zero to 1.5 times the expected Kp and the Vsys grid
+spans at least five times the absolute stellar systemic velocity in each
+direction. The output includes model, SVD-sequence, template-sequence,
+rank-selection, and four-panel observed/injected/null diagnostic figures.
+
+Example configurations for all validation datasets are in `examples/hrccs/`.
+Edit the input/output paths as needed:
+
+```bash
+decanter-hrccs examples/hrccs/toi2109b.toml
+decanter-hrccs examples/hrccs/wasp69b.toml
+decanter-hrccs examples/hrccs/toi3486b.toml
+```
+
 `decanter.combine(series)` detects the per-exposure physical WCS differences
 and resamples onto the first reduction's corrected grid before stacking.
