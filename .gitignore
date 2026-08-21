@@ -63,5 +63,9 @@ settings.local.json
 # Sphinx build output
 docs/_build/
 
+# Local wavecal products and rendered PDF QA
+/output/
+/tmp/
+
 # bundled per-mode aperture reference templates (small, needed at runtime)
 !decanter/calib/reference_data/*.npz

@@ -7,16 +7,16 @@ and :mod:`decanter.wavelength` so each step is a pure function on
 in-memory arrays. No waveshift correction is applied (waveshift is
 relative across frames; meaningless for a single frame).
 
-:func:`decanter.combine` is reserved for multi-frame stacks (eventual
-S/N-weighted combination after cross-frame waveshift alignment). It
-raises :class:`NotImplementedError` for now — transit-style per-frame
-work uses :func:`reduce` in a loop and keeps each frame independent.
+:func:`decanter.reduce_many` preserves WARP's relative cross-frame waveshift
+and can optionally layer the physical telluric/OH wavecal on its output.
+:func:`decanter.combine` S/N-weights an aligned set into a master spectrum.
 """
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from astropy.io import fits as _astrofits
@@ -40,6 +40,10 @@ from decanter.utils.cosmic_ray import ndr_from_header
 from decanter.waveshift.apply import apply_waveshift_one_order
 from decanter.waveshift.measure import waveshift_clip, waveshift_one_order
 from decanter.wavelength import dispcor_one_order, truncate_spectrum
+
+if TYPE_CHECKING:
+    from decanter.wavecal.config import WavecalConfig
+    from decanter.wavecal.solution import WavecalSolution
 
 _OBJNAME_BAD_CHARS: tuple[str, ...] = (" ", "'", "\"", "#", "/")
 
@@ -340,10 +344,19 @@ def reduce(
     if save_intermediates:
         inter.strip_wcs = strips_lambda
 
+    # Observation metadata travels with the reduction so a multi-frame
+    # analysis can recover mid-times, pointing and instrument configuration
+    # from the reduced products without reopening the raw frames.
+    meta = headers.frame_meta(obj_header)
+    if obj_path is not None:
+        meta["OBJFRAME"] = obj_path.stem
+    if sky_path is not None:
+        meta["SKYFRAME"] = sky_path.stem
+
     r = _finalize_wavelength(
         obj_1d, sky_1d, strips_lambda, objname, obj_path, sky_path,
         calib, cfg, inter, shift_wave=shift_wave,
-        save_intermediates=save_intermediates,
+        save_intermediates=save_intermediates, meta=meta,
     )
     if workdir is not None:
         r.write_to(workdir, save_intermediates=save_intermediates)
@@ -363,6 +376,7 @@ def _finalize_wavelength(
     *,
     shift_wave: float,
     save_intermediates: bool,
+    meta: dict | None = None,
 ) -> Reduction:
     """s11–s13: truncate (with optional shift) → dispcor → FSR cut → Reduction.
 
@@ -439,6 +453,9 @@ def _finalize_wavelength(
             if spec is not None:
                 sky_out[(cut, m)] = spec
 
+    out_meta = dict(meta or {})
+    out_meta["WAVSHIFT"] = float(shift_wave)
+
     return Reduction(
         obj_name=objname,
         obj_path=obj_path,
@@ -446,23 +463,122 @@ def _finalize_wavelength(
         obj=obj_out,
         sky=sky_out if cfg.flag_skyemission else None,
         intermediates=inter,
+        meta=out_meta,
     )
 
 
 @dataclass(frozen=True, slots=True)
 class TransitSeries:
-    """A cross-frame-aligned set of per-frame reductions (a transit time series).
+    """A set of per-frame reductions with layered wavelength calibration.
 
     Attributes:
-        reductions: one :class:`Reduction` per frame, wavelength-aligned to
-            ``reductions[refid]`` via the measured cross-frame shift.
-        shifts: per-frame wavelength shift applied (Å), length == n frames.
+        reductions: one :class:`Reduction` per frame. The WARP-compatible
+            relative alignment is always applied first when requested; an
+            optional physical wavecal correction may then be layered on top.
+        shifts: WARP-compatible per-frame relative shift applied (Angstrom),
+            length == n frames. These values are retained unchanged when the
+            physical wavecal layer is applied.
         refid: index of the reference frame (its shift is 0).
+        wavecal_solution: the optional telluric/OH residual solution applied
+            after the WARP-compatible pass. ``None`` means WARP-only.
     """
 
     reductions: list
     shifts: NDArray
     refid: int
+    wavecal_solution: WavecalSolution | None = None
+
+    def write_to(
+        self,
+        workdir: str | Path,
+        *,
+        save_intermediates: bool = False,
+    ) -> None:
+        """Write the fully calibrated time series and its provenance.
+
+        Each exposure is written to ``workdir/<OBJFRAME>/``.  This method is
+        intentionally attached to the completed :class:`TransitSeries`, not
+        to an intermediate reduction step: when a physical wavecal solution
+        is present, the FITS WCS therefore contains the telluric/OH correction
+        layered on top of the original WARP alignment.
+
+        The root directory also receives ``warp_alignment.npz`` and, when
+        applicable, ``wavecal_solution.npz`` so the two calibration layers can
+        be inspected or reproduced independently.
+        """
+        root = Path(workdir)
+        root.mkdir(parents=True, exist_ok=True)
+
+        frame_ids: list[str] = []
+        for index, reduction in enumerate(self.reductions):
+            frame_id = str(reduction.meta.get("OBJFRAME", "")).strip()
+            if not frame_id and reduction.obj_path is not None:
+                frame_id = reduction.obj_path.stem
+            if not frame_id:
+                frame_id = f"frame_{index:04d}"
+            frame_ids.append(frame_id)
+
+        if len(set(frame_ids)) != len(frame_ids):
+            raise ValueError("cannot write TransitSeries with duplicate frame ids")
+
+        for frame_id, reduction in zip(frame_ids, self.reductions, strict=True):
+            reduction.write_to(
+                root / frame_id,
+                save_intermediates=save_intermediates,
+            )
+
+        np.savez_compressed(
+            root / "warp_alignment.npz",
+            frame_ids=np.asarray(frame_ids, dtype="U64"),
+            shifts=np.asarray(self.shifts, dtype=float),
+            refid=np.asarray(self.refid, dtype=np.int32),
+        )
+        if self.wavecal_solution is not None:
+            self.wavecal_solution.save_npz(root / "wavecal_solution.npz")
+
+
+def calibrate_wavelengths(
+    series: TransitSeries,
+    config: WavecalConfig | None = None,
+    *,
+    verbose: bool = True,
+    diagnostic_pdf: str | Path | None = None,
+) -> TransitSeries:
+    """Layer physical telluric/OH wavecal on a WARP-aligned series.
+
+    This deliberately does not replace or recompute ``series.shifts``. The
+    WARP-compatible cross-frame correction remains the first calibration
+    layer; the hybrid solver measures the residual physical correction on its
+    output and updates only the wavelength WCS of each order.
+    """
+    if series.wavecal_solution is not None:
+        raise ValueError("this TransitSeries already has a physical wavecal solution")
+
+    # Imported lazily so the base WARP-compatible pipeline retains its light
+    # dependency footprint and continues to work without the wavecal extra.
+    from decanter.wavecal.config import WavecalConfig
+    from decanter.wavecal.series import from_reductions
+    from decanter.wavecal.solve import solve
+
+    cfg = config or WavecalConfig()
+    reference = from_reductions(series.reductions, fsr_cut=cfg.fsr_cut)
+    cfg = cfg.resolved_for(reference.instmode)
+    if diagnostic_pdf is None:
+        solution = solve(reference, cfg, verbose=verbose, diagnostic_pdf=None)
+    else:
+        from decanter.wavecal.report import wavecal_report_pdf
+
+        run = solve(reference, cfg, verbose=verbose, return_diagnostics=True)
+        label = series.reductions[0].obj_name if series.reductions else "dataset"
+        wavecal_report_pdf(run, diagnostic_pdf, dataset=label)
+        solution = run.solution
+    corrected = solution.apply_many(series.reductions)
+    return TransitSeries(
+        reductions=corrected,
+        shifts=series.shifts,
+        refid=series.refid,
+        wavecal_solution=solution,
+    )
 
 
 def reduce_many(
@@ -475,6 +591,12 @@ def reduce_many(
     check_calib: bool = True,
     subtract_background: bool = False,
     align: bool = True,
+    workdir: str | Path | None = None,
+    save_intermediates: bool = False,
+    wavecal_config: WavecalConfig | None = None,
+    wavecal_verbose: bool = True,
+    wavecal_diagnostic_pdf: str | Path | None = None,
+    jobs: int = 1,
 ) -> TransitSeries:
     """Reduce a list of ``(obj, sky)`` frame pairs and align them in wavelength.
 
@@ -482,7 +604,12 @@ def reduce_many(
     per-frame cross-frame wavelength shift by cross-correlating the extracted
     1D spectra against a reference frame (WARP's ``ccwaveshift`` / s10), and
     re-runs only the cheap wavelength-finalize tail with each frame's shift so
-    every frame lands on the reference frame's grid.
+    every frame lands on the reference frame's grid. When ``wavecal_config``
+    is supplied, the telluric/OH physical calibration is then solved from and
+    applied to those WARP-aligned products. The two layers remain separately
+    recorded in :class:`TransitSeries`. If ``workdir`` is supplied, writing is
+    deliberately deferred until this final state, so the saved FITS WCS
+    includes both layers rather than stopping at the original WARP solution.
 
     Args:
         pairs: ``[(obj, sky), ...]`` — paths or arrays, as for :func:`reduce`.
@@ -490,20 +617,62 @@ def reduce_many(
         extract: ``"box"`` or ``"optimal"`` (applied to every frame).
         align: if False, skip shift measurement (shifts all 0) — useful to
             get the per-frame reductions without cross-frame alignment.
+        workdir: optional root for the completed time series. One directory is
+            written per object frame, plus the calibration solution files.
+        save_intermediates: also persist captured reduction intermediates when
+            ``workdir`` is supplied. Final spectra are always written.
+        wavecal_config: optional physical wavelength-calibration settings.
+            ``None`` (default) preserves the original WARP-only behavior.
+        wavecal_verbose: print template-fit progress when physical wavecal is
+            enabled.
+        wavecal_diagnostic_pdf: optional filename for the full calibration
+            report: order selection, telluric and OH fits, drift by physical
+            order, interpolation, and tracer compatibility.
+        jobs: number of worker processes for the expensive independent
+            per-frame extraction stage. Series alignment, physical wavecal,
+            and final writing remain single coordinated stages.
 
     Returns:
         A :class:`TransitSeries`.
     """
     cfg = config or Config()
-    base = [
-        reduce(o, calib, sky=s, config=cfg, extract=extract,
-               check_calib=check_calib, subtract_background=subtract_background,
-               save_intermediates=True, shift_wave=0.0)
-        for (o, s) in pairs
-    ]
+
+    def _finish(result: TransitSeries) -> TransitSeries:
+        if wavecal_config is not None:
+            result = calibrate_wavelengths(
+                result,
+                wavecal_config,
+                verbose=wavecal_verbose,
+                diagnostic_pdf=wavecal_diagnostic_pdf,
+            )
+        if workdir is not None:
+            result.write_to(workdir, save_intermediates=save_intermediates)
+        return result
+
+    if jobs < 1:
+        raise ValueError("jobs must be at least 1")
+    reduction_kwargs = {
+        "config": cfg,
+        "extract": extract,
+        "check_calib": check_calib,
+        "subtract_background": subtract_background,
+        "save_intermediates": True,
+        "shift_wave": 0.0,
+    }
+    if jobs == 1:
+        base = [reduce(o, calib, sky=s, **reduction_kwargs) for o, s in pairs]
+    else:
+        # Resolve futures in submission order so frame ordering is stable.
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = [
+                pool.submit(reduce, o, calib, sky=s, **reduction_kwargs)
+                for o, s in pairs
+            ]
+            base = [future.result() for future in futures]
     n = len(base)
     if not align or n < 2:
-        return TransitSeries(reductions=base, shifts=np.zeros(n), refid=refid or 0)
+        result = TransitSeries(reductions=base, shifts=np.zeros(n), refid=refid or 0)
+        return _finish(result)
 
     orders = sorted(set.intersection(*[set(r.intermediates.spectra_1d) for r in base]))
     # Truncated 1D per order per frame (the WARP `_m###c` cross-correlation input).
@@ -533,9 +702,10 @@ def reduce_many(
         aligned.append(_finalize_wavelength(
             it.spectra_1d, it.sky_1d, it.strip_wcs, r.obj_name, r.obj_path,
             r.sky_path, calib, cfg, it, shift_wave=float(sh),
-            save_intermediates=True,
+            save_intermediates=True, meta=r.meta,
         ))
-    return TransitSeries(reductions=aligned, shifts=shift_avg, refid=refid)
+    result = TransitSeries(reductions=aligned, shifts=shift_avg, refid=refid)
+    return _finish(result)
 
 
 def combine(
@@ -569,18 +739,60 @@ def combine(
     for key in sorted(keys):
         specs = [r.obj[key] for r in reds]
         L = min(s.flux.size for s in specs)
-        F = np.array([np.asarray(s.flux[:L], float) for s in specs])
+        ref = specs[0]
+        same_grid = all(
+            np.isclose(spec.crval1, ref.crval1, rtol=0.0, atol=1e-12)
+            and np.isclose(spec.cdelt1, ref.cdelt1, rtol=0.0, atol=1e-15)
+            and np.isclose(spec.crpix1, ref.crpix1, rtol=0.0, atol=1e-12)
+            for spec in specs[1:]
+        )
+        if same_grid:
+            F = np.array([np.asarray(spec.flux[:L], float) for spec in specs])
+        else:
+            # A per-frame physical wavecal changes the WCS without touching
+            # flux. Regrid those spectra exactly once, here at combination,
+            # instead of silently averaging different physical wavelengths.
+            target_wave = np.asarray(ref.wavelength[:L], dtype=float)
+            rows = []
+            for spec in specs:
+                native_wave = np.asarray(spec.wavelength, dtype=float)
+                native_flux = np.asarray(spec.flux, dtype=float)
+                if native_wave[0] > native_wave[-1]:
+                    native_wave = native_wave[::-1]
+                    native_flux = native_flux[::-1]
+                rows.append(
+                    np.interp(target_wave, native_wave, native_flux, left=np.nan, right=np.nan)
+                )
+            F = np.asarray(rows)
         if weight == "uniform":
             w = np.ones(len(specs))
         else:
             w = np.array([max(float(np.nanmedian(s.flux[:L])), 1e-9) for s in specs])
-        stack = np.average(F, axis=0, weights=w)
-        ref = specs[0]
+        if np.all(np.isfinite(F)):
+            stack = np.average(F, axis=0, weights=w)
+        else:
+            valid = np.isfinite(F)
+            denominator = np.sum(valid * w[:, None], axis=0)
+            stack = np.divide(
+                np.nansum(F * w[:, None], axis=0),
+                denominator,
+                out=np.full(L, np.nan),
+                where=denominator > 0,
+            )
         obj_out[key] = OrderSpectrum(
             order=key[1], fsr_cut=key[0], flux=stack.astype(np.float32),
             crval1=ref.crval1, cdelt1=ref.cdelt1, crpix1=ref.crpix1,
         )
+    # A stack has no single mid-time or pointing, so only the frame-independent
+    # configuration keys are carried onto the combined product.
+    stack_meta = {
+        key: value for key, value in reds[0].meta.items()
+        if key in {"OBJECT", "INSTRUME", "TELESCOP", "OBSERVAT", "INSTMODE",
+                   "SETTING", "PERIOD", "SLIT", "PIPELINE"}
+    }
+    stack_meta["NCOMBINE"] = len(reds)
+
     return Reduction(
         obj_name=reds[0].obj_name, obj_path=None, sky_path=None,
-        obj=obj_out, sky=None,
+        obj=obj_out, sky=None, meta=stack_meta,
     )

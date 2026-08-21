@@ -51,3 +51,62 @@ def get(header: fits.Header | dict[str, Any], key: str, default: Any = "N/A") ->
         return header[key]
     except (KeyError, IndexError):
         return default
+
+
+# Keys carried from the raw frame header onto every 1D output spectrum.
+#
+# decanter's outputs previously held the WCS alone, which is enough to reduce a
+# frame but not to do anything with a *set* of frames: a time series needs the
+# mid-exposure time, the pointing and the site to derive a BJD and a barycentric
+# correction, and needs the instrument configuration to know which calibration
+# regime it is in. Every one of those lives only in the raw frame, so it is
+# propagated here.
+FRAME_META_KEYS: tuple[str, ...] = (
+    "OBJECT",
+    "INSTRUME",
+    "TELESCOP",
+    "OBSERVAT",
+    "INSTMODE",
+    "SETTING",
+    "PERIOD",
+    "SLIT",
+    "PIPELINE",
+    "DATE-OBS",
+    "UT-STR",
+    "UT-END",
+    "EXPTIME",
+    "ACQTIME1",
+    "RA",
+    "DEC",
+    "AIRMASS",
+    "HA",
+    "ZD",
+    "NODPOS",
+    "NODPAT",
+)
+
+
+def frame_meta(
+    header: fits.Header | dict[str, Any],
+    *,
+    keys: tuple[str, ...] = FRAME_META_KEYS,
+) -> dict[str, Any]:
+    """Extract the propagated observation metadata from a raw frame header.
+
+    Missing keys are omitted rather than filled with ``"N/A"``, so a caller can
+    distinguish "not present in the raw frame" from "present and unreadable".
+
+    Args:
+        header: the raw object-frame header.
+        keys: keywords to carry (defaults to :data:`FRAME_META_KEYS`).
+
+    Returns:
+        ``{key: value}`` for every key present in ``header``.
+    """
+    sentinel = object()
+    meta: dict[str, Any] = {}
+    for key in keys:
+        value = get(header, key, default=sentinel)
+        if value is not sentinel:
+            meta[key] = value
+    return meta

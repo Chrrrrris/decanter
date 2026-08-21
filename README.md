@@ -11,9 +11,32 @@ validated across all three modes (HIRES-Y, HIRES-J, and WIDE).
 
 ```bash
 pip install -e .
+# For physical telluric/OH wavelength calibration:
+pip install -e '.[wavecal]'
 ```
 
 ## Use
+
+For a complete time series, the repository's `reduce.py` is the normal entry
+point. It performs the original WARP-compatible cross-frame alignment and then
+physical wavecal by default. HITRAN tables are downloaded by ExoJAX into a
+per-user cache on first use; the raw-frame and calibration directories need no
+line lists or cache files.
+
+```bash
+python reduce.py \
+  --frames TOI2109/ \
+  --listfile TOI2109.txt \
+  --calib /data/TOI2109_calib \
+  --out out/TOI2109 \
+  --jobs 8 \
+  --diagnostic-pdf
+```
+
+Without `--diagnostic-pdf`, wavecal still runs; only the report is skipped.
+Select a concrete method with `--wavecal hybrid_refit`, `--wavecal
+hybrid_static`, `--wavecal oh_refit`, or `--wavecal oh_static`. The default is
+`--wavecal auto`. Use `--no-wavecal` for an intentionally WARP-only reduction.
 
 ```python
 import decanter
@@ -31,4 +54,42 @@ airglow lines), dark current, bias, and stray light are **retained** in the spec
 Pass `subtract_background=True` to estimate and remove that background from the
 slit during extraction (suppressing the OH lines).
 
-For a transit, loop over your frames: `[decanter.reduce(o, calib, sky=s) for o, s in pairs]`.
+For a transit, `reduce_many` first applies the original WARP-compatible
+cross-frame wavelength shift. Supplying `wavecal_config` layers the physical
+telluric/OH hybrid correction on top; omitting it preserves WARP-only behavior.
+
+```python
+series = decanter.reduce_many(pairs, calib)  # original WARP alignment
+
+series = decanter.reduce_many(
+    pairs,
+    calib,
+    # auto: HIRES-Y/J -> hybrid_refit; WIDE -> hybrid_static
+    wavecal_config=decanter.WavecalConfig(),
+    wavecal_diagnostic_pdf="output/wavecal_diagnostics.pdf",  # optional
+    workdir="output/corrected",
+)
+
+# Both calibration layers remain available independently.
+series.shifts                    # WARP relative shifts, Angstrom
+series.wavecal_solution.velocity # residual physical shifts, km/s/order
+```
+
+To calibrate an existing Decanter reduction directory without repeating the
+extraction, use the command-line layer. The report flag is optional and may be
+given with no filename, in which case it writes `wavecal_diagnostics.pdf`
+inside the output directory.
+
+```bash
+python scripts/run_wavecal.py \
+  /data/decanter_reductions/wasp69b \
+  /data/decanter_wavecal/wasp69b \
+  --diagnostic-pdf
+```
+
+All four concrete modes remain selectable with `--mode`: `oh_static`,
+`oh_refit`, `hybrid_static`, and `hybrid_refit`. See
+`examples/run_wavecal_three_datasets.sh` for a complete three-dataset loop.
+
+`decanter.combine(series)` detects the per-exposure physical WCS differences
+and resamples onto the first reduction's corrected grid before stacking.

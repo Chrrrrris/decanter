@@ -39,6 +39,14 @@ jax = [
     "jax>=0.4",
     "jaxlib>=0.4",
 ]
+wavecal = [
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "optax>=0.2",
+    "exojax>=2.2",
+    "radis>=0.16",
+    "h5py>=3.8",
+]
 docs = [
     "sphinx>=7",
     "sphinx-rtd-theme>=2",
