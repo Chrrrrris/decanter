@@ -53,6 +53,7 @@ class SystemConfig:
 class AtmosphereConfig:
     species: tuple[str, ...] = ("H2O",)
     backend: str = "exojax"
+    model_verbose: bool = False
     pressure_top_bar: float = 1.0e-8
     pressure_bottom_bar: float = 10.0
     n_layers: int = 60

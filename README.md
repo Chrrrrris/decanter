@@ -125,6 +125,12 @@ this with `injection.null_realizations` in the TOML file.
 Progress bars are enabled by default for template construction, SVD-rank
 search, injection recovery, and null realizations. Set the top-level TOML field
 `show_progress = false` to disable them in batch logs.
+ExoJAX's low-level setup messages are hidden by default so they do not overwrite
+the progress display; set `atmosphere.model_verbose = true` when debugging a
+model build.
+On macOS, FastChem chemistry runs in a cached, single-threaded subprocess so
+its bundled OpenMP runtime cannot conflict with JAX/ExoJAX. No global
+`KMP_DUPLICATE_LIB_OK` setting is needed.
 By default the Kp grid spans zero to 1.5 times the expected Kp and the Vsys grid
 spans at least five times the absolute stellar systemic velocity in each
 direction. The output includes model, SVD-sequence, template-sequence,

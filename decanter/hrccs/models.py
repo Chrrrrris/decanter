@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import types
 import urllib.request
+import warnings
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -54,8 +59,9 @@ def _fastchem_files(config) -> tuple[Path, Path]:
     return abundance, logk
 
 
-def equilibrium_profiles(config, metallicity_dex: float, pressure_bar: np.ndarray, temperature_k: np.ndarray,
-                         species: tuple[str, ...]):
+def _equilibrium_profiles_local(config, metallicity_dex: float, pressure_bar: np.ndarray,
+                                temperature_k: np.ndarray, species: tuple[str, ...]):
+    """Run FastChem locally; called only inside the isolated worker process."""
     import pyfastchem
 
     abundance_path, logk_path = _fastchem_files(config)
@@ -106,6 +112,64 @@ def equilibrium_profiles(config, metallicity_dex: float, pressure_bar: np.ndarra
         "logk_file": str(logk_path),
         "median_vmr": {name: float(np.nanmedian(values)) for name, values in vmr.items()},
     }
+
+
+def equilibrium_profiles(config, metallicity_dex: float, pressure_bar: np.ndarray,
+                         temperature_k: np.ndarray, species: tuple[str, ...]):
+    """Run FastChem outside the ExoJAX process to isolate OpenMP runtimes."""
+    payload = {
+        "config": {
+            "cache_dir": str(config.cache_dir),
+            "fastchem_abundance_file": config.fastchem_abundance_file,
+            "fastchem_logk_file": config.fastchem_logk_file,
+        },
+        "metallicity_dex": float(metallicity_dex),
+        "species": list(species),
+    }
+    with tempfile.TemporaryDirectory(prefix="decanter-fastchem-") as temporary:
+        root = Path(temporary)
+        request = root / "request.npz"
+        response = root / "response.npz"
+        np.savez_compressed(
+            request,
+            pressure_bar=np.asarray(pressure_bar, dtype=float),
+            temperature_k=np.asarray(temperature_k, dtype=float),
+            payload_json=np.asarray(json.dumps(payload, sort_keys=True)),
+        )
+        command = [sys.executable, "-m", "decanter.hrccs.fastchem_worker",
+                   str(request), str(response)]
+        worker_environment = os.environ.copy()
+        # The macOS pyFastChem wheel bundles libomp in addition to NumPy's
+        # runtime. Keep its compatibility escape hatch confined to this
+        # single-threaded subprocess; never expose it to JAX/ExoJAX.
+        worker_environment["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        worker_environment["OMP_NUM_THREADS"] = "1"
+        worker_environment["OPENBLAS_NUM_THREADS"] = "1"
+        worker_environment["MKL_NUM_THREADS"] = "1"
+        completed = subprocess.run(
+            command, capture_output=True, text=True, check=False,
+            env=worker_environment,
+        )
+        if completed.returncode != 0 or not response.exists():
+            details = "\n".join(
+                value.strip() for value in (completed.stdout, completed.stderr) if value.strip()
+            )
+            raise RuntimeError(
+                f"isolated FastChem worker failed with exit code {completed.returncode}:\n{details}"
+            )
+        with np.load(response, allow_pickle=False) as result:
+            names = tuple(str(value) for value in result["species"])
+            matrix = np.asarray(result["vmr"], dtype=float)
+            vmr = {name: matrix[index] for index, name in enumerate(names)}
+            mmw = np.asarray(result["mean_molecular_weight"], dtype=float)
+            metadata = json.loads(str(result["metadata_json"]))
+    if (not np.all(np.isfinite(mmw))) or np.any(mmw <= 0):
+        raise RuntimeError("isolated FastChem worker returned an invalid mean molecular weight")
+    for name, profile in vmr.items():
+        if not np.all(np.isfinite(profile)) or np.any(profile < 0):
+            raise RuntimeError(f"isolated FastChem worker returned an invalid {name} profile")
+    metadata["execution"] = "isolated subprocess (OpenMP runtime separation)"
+    return vmr, mmw, metadata
 
 
 def _is_atomic(species: str) -> bool:
@@ -195,7 +259,7 @@ class TemplateFactory:
             self.cache = Path(tempfile.gettempdir()) / "decanter-hrccs-cache"
             self.cache.mkdir(parents=True, exist_ok=True)
             self.config = replace(atmosphere, cache_dir=str(self.cache))
-        self._chemistry = None
+        self._chemistry = {}
 
     def _key(self, species, wave):
         payload = {
@@ -215,7 +279,23 @@ class TemplateFactory:
         if self.config.backend == "analytic":
             template = self._analytic(species, wave)
         elif self.config.backend == "exojax":
-            template = self._exojax(species, wave)
+            if self.config.model_verbose:
+                template = self._exojax(species, wave)
+            else:
+                captured_stdout, captured_stderr = io.StringIO(), io.StringIO()
+                try:
+                    with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr), \
+                            warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", module=r"exojax\..*")
+                        template = self._exojax(species, wave)
+                except Exception as exc:
+                    details = "\n".join(
+                        value.strip() for value in (
+                            captured_stdout.getvalue(), captured_stderr.getvalue()
+                        ) if value.strip()
+                    )
+                    suffix = f"\nCaptured model output:\n{details}" if details else ""
+                    raise RuntimeError(f"ExoJAX template failed for {species}: {exc}{suffix}") from exc
         else:
             raise ValueError(f"unknown atmosphere backend {self.config.backend!r}")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,10 +340,13 @@ class TemplateFactory:
         temperature_np = np.full(self.config.n_layers, self.system.equilibrium_temperature_k)
         temperature = jnp.asarray(temperature_np)
         all_species = tuple(dict.fromkeys((species, "H2", "He")))
-        vmr, mmw_np, chemistry = equilibrium_profiles(
-            self.config, self.system.metallicity_dex,
-            np.asarray(art.pressure), temperature_np, all_species
-        )
+        chemistry_key = (species, tuple(all_species))
+        if chemistry_key not in self._chemistry:
+            self._chemistry[chemistry_key] = equilibrium_profiles(
+                self.config, self.system.metallicity_dex,
+                np.asarray(art.pressure), temperature_np, all_species
+            )
+        vmr, mmw_np, chemistry = self._chemistry[chemistry_key]
         mmw = jnp.asarray(mmw_np)
         radius = self.system.planet_radius_rjup * R_JUP_CM
         stellar_radius = self.system.stellar_radius_rsun * R_SUN_CM
