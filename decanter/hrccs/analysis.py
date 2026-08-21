@@ -256,7 +256,7 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
         local_kp_half_width, local_vsys_half_width,
     )
     null_maps, null_expected, null_local = [], [], []
-    for index in range(max(1, null_realizations)):
+    for index in range(null_realizations):
         null_data = synthetic(np.zeros_like(expected_model), seed + 1000 + index)
         null_paths = _paths(null_data, mask, (selected.count,))
         null = evaluate(

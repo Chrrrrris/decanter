@@ -7,7 +7,13 @@ import numpy as np
 import pytest
 
 from decanter.hrccs.analysis import ComponentResult, _map_summary, _select_component
-from decanter.hrccs.config import HRCCSConfig, InputConfig, SearchConfig, SystemConfig
+from decanter.hrccs.config import (
+    HRCCSConfig,
+    InjectionConfig,
+    InputConfig,
+    SearchConfig,
+    SystemConfig,
+)
 from decanter.wavecal.products import telluric_product
 
 
@@ -69,6 +75,7 @@ def test_default_search_grids_and_local_window():
     assert vsys[-1] == 50.0
     assert config.search.local_kp_half_width_kms == 30.0
     assert config.search.local_vsys_half_width_kms == 15.0
+    assert InjectionConfig().null_realizations == 5
 
 
 def test_search_grid_steps_must_be_positive():
@@ -83,6 +90,8 @@ def test_search_grid_steps_must_be_positive():
     )
     with pytest.raises(ValueError, match="kp_step_kms"):
         replace(config, search=SearchConfig(kp_step_kms=0.0)).validate()
+    with pytest.raises(ValueError, match="null_realizations"):
+        replace(config, injection=InjectionConfig(null_realizations=0)).validate()
 
 
 def test_wavecal_telluric_product_is_continuous_and_unthresholded(tmp_path):

@@ -104,7 +104,7 @@ class SearchConfig:
 class InjectionConfig:
     scale: float = 1.0
     random_seed: int = 42690
-    null_realizations: int = 20
+    null_realizations: int = 5
 
 
 @dataclass(frozen=True)
@@ -144,6 +144,8 @@ class HRCCSConfig:
         if (self.search.local_kp_half_width_kms < 0
                 or self.search.local_vsys_half_width_kms < 0):
             raise ValueError("local component-selection half widths must be non-negative")
+        if self.injection.null_realizations < 1:
+            raise ValueError("injection null_realizations must be at least one")
 
     def grids(self, stellar_rv_kms: float):
         import numpy as np
