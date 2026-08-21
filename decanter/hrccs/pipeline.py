@@ -126,7 +126,7 @@ def run(config):
             "criterion": "maximum map S/N within the local expected-planet window",
             "kp_half_width_kms": config.search.local_kp_half_width_kms,
             "vsys_half_width_kms": config.search.local_vsys_half_width_kms,
-            "null_fap_repeats_component_search": True,
+            "injection_and_null_rank": "fixed to the observed-data-selected rank",
         },
         "results": [{"species": item.species,
                      "selected_svd_components": item.selected.count,

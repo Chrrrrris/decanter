@@ -118,9 +118,8 @@ caches.
 The searched SVD rank is selected by the largest map S/N inside the configured
 local window around the expected planet location. The exact expected-cell value
 and unrestricted global maximum are also recorded, but do not select the rank.
-Null realizations repeat that rank search when estimating the false-alarm
-fraction, while the displayed null map uses the observed rank for an
-apples-to-apples comparison.
+The injection recovery and every null realization then use that fixed
+observed-data-selected rank; they do not repeat the component search.
 By default the Kp grid spans zero to 1.5 times the expected Kp and the Vsys grid
 spans at least five times the absolute stellar systemic velocity in each
 direction. The output includes model, SVD-sequence, template-sequence,

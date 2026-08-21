@@ -258,25 +258,19 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
     null_maps, null_expected, null_local = [], [], []
     for index in range(max(1, null_realizations)):
         null_data = synthetic(np.zeros_like(expected_model), seed + 1000 + index)
-        null_paths = _paths(null_data, mask, counts)
-        null_components = []
-        for count in counts:
-            null_components.append(evaluate(
-                count, _residual_cube(null_paths, count),
-                _filtered_cube(expected_model, null_paths, count), wavelength_um, mask,
-                phase, transit_weight, rv_grid, kp_grid, vsys_grid,
-                expected_kp, expected_vsys, sigma_clip,
-                local_kp_half_width, local_vsys_half_width,
-            ))
-        null_at_observed_rank = next(
-            item for item in null_components if item.count == selected.count
+        null_paths = _paths(null_data, mask, (selected.count,))
+        null = evaluate(
+            selected.count, _residual_cube(null_paths, selected.count),
+            _filtered_cube(expected_model, null_paths, selected.count), wavelength_um, mask,
+            phase, transit_weight, rv_grid, kp_grid, vsys_grid,
+            expected_kp, expected_vsys, sigma_clip,
+            local_kp_half_width, local_vsys_half_width,
         )
-        null_rank_selected = _select_component(null_components)
-        # The displayed null map uses the observed rank for direct comparison.
-        # The FAP repeats rank selection within every null to include the trials factor.
-        null_maps.append(null_at_observed_rank.snr_map)
-        null_expected.append(null_at_observed_rank.expected_snr)
-        null_local.append(null_rank_selected.local_peak_snr)
+        # Match the injection recovery: every null uses the rank selected from
+        # the observed data, without re-tuning on the null realization.
+        null_maps.append(null.snr_map)
+        null_expected.append(null.expected_snr)
+        null_local.append(null.local_peak_snr)
     null_expected = np.asarray(null_expected)
     null_local = np.asarray(null_local)
     fap = float((1 + np.count_nonzero(null_local >= selected.local_peak_snr)) /
