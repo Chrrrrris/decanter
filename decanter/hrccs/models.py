@@ -40,7 +40,11 @@ def _download(url: str, path: Path) -> Path:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".part")
-    urllib.request.urlretrieve(url, temporary)  # noqa: S310 - fixed scientific archives
+    try:
+        urllib.request.urlretrieve(url, temporary)  # noqa: S310 - fixed scientific archives
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     temporary.replace(path)
     return path
 
@@ -248,10 +252,25 @@ def _kurucz_path(species: str, root: Path) -> Path:
     )
 
 
+def _sample_instrument(nu, values, wavelength_um, resolving_power):
+    """Convolve on the model grid and sample onto one calibrated order."""
+    from exojax.postproc.specop import SopInstProfile
+    from exojax.utils.instfunc import resolution_to_gaussian_std
+
+    sop = SopInstProfile(nu, vrmax=500.0)
+    beta = resolution_to_gaussian_std(resolving_power)
+    target_nu = 1.0e4 / np.asarray(wavelength_um)[::-1]
+    sampled = sop.sampling(sop.ipgauss(values, beta), 0.0, target_nu)
+    return np.asarray(sampled)[::-1]
+
+
 class TemplateFactory:
-    def __init__(self, system, atmosphere):
+    def __init__(self, system, atmosphere, *, instmode: str | None = None):
         self.system = system
         self.config = atmosphere
+        self.instmode = str(instmode or "")
+        if atmosphere.resolving_power is None:
+            raise ValueError("TemplateFactory requires a resolved atmosphere resolving_power")
         self.cache = Path(atmosphere.cache_dir).expanduser()
         try:
             self.cache.mkdir(parents=True, exist_ok=True)
@@ -263,7 +282,7 @@ class TemplateFactory:
 
     def _key(self, species, wave):
         payload = {
-            "schema": 1, "species": species,
+            "schema": 2, "species": species, "instmode": self.instmode,
             "wave": [round(float(wave[0]), 8), round(float(wave[-1]), 8), len(wave)],
             "system": vars(self.system), "atmosphere": vars(self.config),
         }
@@ -315,15 +334,16 @@ class TemplateFactory:
             width = center * 2.0 / C_KMS
             depth += 4.0e-4 * np.exp(-0.5 * ((wave - center) / width) ** 2)
         return Template(species, wave, depth, -(depth - np.nanpercentile(depth, 10)),
-                        {"backend": "analytic_test_only"})
+                        {"backend": "analytic_test_only",
+                         "instrument_mode": self.instmode,
+                         "resolving_power": float(self.config.resolving_power),
+                         "sampling": "native per-order wavelength grid"})
 
     def _exojax(self, species, wave):
         import jax.numpy as jnp
         from exojax.opacity import OpaCIA, OpaDirect, OpaPremodit, OpaRayleigh
-        from exojax.postproc.specop import SopInstProfile
         from exojax.rt import ArtTransPure
         from exojax.utils.grids import wavenumber_grid
-        from exojax.utils.instfunc import resolution_to_gaussian_std
 
         pad = 350.0 / C_KMS
         nu_min = 1.0e4 / (wave[-1] * (1.0 + pad))
@@ -401,14 +421,16 @@ class TemplateFactory:
                 )
         if self.config.include_cia:
             from exojax.database.cia.api import CdbCIA
+            from exojax.utils.url import url_HITRANCIA
             cia_root = (Path(self.config.cia_dir).expanduser()
                         if self.config.cia_dir else self.cache / "cia")
             for filename, first, second in (
                 ("H2-H2_2011.cia", "H2", "H2"),
                 ("H2-He_2011.cia", "H2", "He"),
             ):
-                cia_path = _download(f"https://hitran.org/data/CIA/{filename}",
-                                     cia_root / filename)
+                # Use ExoJAX's version-matched archive root. HITRAN moved the
+                # files under /CIA/main/, making the former hard-coded URL 404.
+                cia_path = _download(f"{url_HITRANCIA()}{filename}", cia_root / filename)
                 opa_cia = OpaCIA(CdbCIA(str(cia_path), nurange=nu), nu_grid=nu)
                 continuum += art.opacity_profile_cia(
                     opa_cia.logacia_matrix(temperature), temperature,
@@ -423,14 +445,14 @@ class TemplateFactory:
             return np.asarray(art.run(dtau, temperature, mmw, radius, gravity_btm)) * baseline
         high_depth = absolute(molecular_dtau + continuum)
         high_continuum = absolute(continuum)
-        sop = SopInstProfile(nu, vrmax=500.0)
-        beta = resolution_to_gaussian_std(self.config.resolving_power)
-        target_nu = 1.0e4 / wave[::-1]
-        depth = np.asarray(sop.sampling(sop.ipgauss(high_depth, beta), 0.0, target_nu))[::-1]
-        cont = np.asarray(sop.sampling(sop.ipgauss(high_continuum, beta), 0.0, target_nu))[::-1]
+        depth = _sample_instrument(nu, high_depth, wave, self.config.resolving_power)
+        cont = _sample_instrument(nu, high_continuum, wave, self.config.resolving_power)
         contrast = -(depth - cont)
         meta = {"backend": "exojax", "source": source, "line_count": line_count,
                 "opa_resolution": float(opa_resolution), "chemistry": chemistry,
+                "instrument_mode": self.instmode,
+                "resolving_power": float(self.config.resolving_power),
+                "sampling": "Gaussian LSF then sampled onto this order wavelength grid",
                 "continuum": {"rayleigh": self.config.include_rayleigh,
                               "cia": self.config.include_cia,
                               "cloud_top_pressure_bar": self.config.cloud_top_pressure_bar},

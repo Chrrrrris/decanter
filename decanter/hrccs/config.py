@@ -63,7 +63,9 @@ class AtmosphereConfig:
     include_cia: bool = True
     h2_vmr: float = 0.85
     he_vmr: float = 0.15
-    resolving_power: float = 68_000.0
+    # None selects the nominal resolving power from the Decanter INSTMODE.
+    # An explicit value remains available for non-standard slits/configurations.
+    resolving_power: float | None = None
     line_strength_crit: float = 1.0e-30
     kurucz_line_strength_crit: float = 0.0
     hitran_isotope: int = 1
@@ -73,6 +75,25 @@ class AtmosphereConfig:
     cia_dir: str | None = None
     kurucz_dir: str | None = None
     cache_dir: str = "~/.cache/decanter/hrccs"
+
+    def resolving_power_for(self, instmode: str | None) -> float:
+        """Resolve the template LSF against the reduced spectrum's mode."""
+        if self.resolving_power is not None:
+            if self.resolving_power <= 0:
+                raise ValueError("atmosphere resolving_power must be positive")
+            return float(self.resolving_power)
+        from decanter.wavecal.config import NOMINAL_RESOLVING_POWER
+
+        normalized = str(instmode or "").strip().upper().replace("_", "-")
+        aliases = {"Y": "HIRES-Y", "J": "HIRES-J", "HIRESY": "HIRES-Y",
+                   "HIRESJ": "HIRES-J"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized in NOMINAL_RESOLVING_POWER:
+            return NOMINAL_RESOLVING_POWER[normalized]
+        raise ValueError(
+            f"no nominal resolving power for INSTMODE={instmode!r}; "
+            "set [atmosphere].resolving_power explicitly"
+        )
 
 
 @dataclass(frozen=True)
@@ -135,6 +156,9 @@ class HRCCSConfig:
             raise ValueError("system transit_midpoint_bjd_tdb and expected_kp_kms are required")
         if not self.atmosphere.species:
             raise ValueError("at least one atmosphere species is required")
+        if (self.atmosphere.resolving_power is not None
+                and self.atmosphere.resolving_power <= 0):
+            raise ValueError("atmosphere resolving_power must be positive")
         counts = self.reduction.svd_components
         if not counts or min(counts) < 0 or len(set(counts)) != len(counts):
             raise ValueError("svd_components must be unique non-negative integers")

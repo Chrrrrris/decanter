@@ -18,6 +18,7 @@ class ScienceCube:
     flux: np.ndarray                # exposure, order, pixel
     time_jd_utc: np.ndarray
     metadata: list[dict]
+    instmode: str
     telluric_transmission: np.ndarray | None = None
 
 
@@ -59,5 +60,6 @@ def load_decanter(directory: str | Path, *, fsr_cut=None, orders=(),
         flux=np.transpose(np.asarray(series.obj, dtype=float), (0, 2, 1)),
         time_jd_utc=np.asarray(series.time_jd, dtype=float),
         metadata=series.meta,
+        instmode=str(series.instmode),
         telluric_transmission=telluric,
     )

@@ -8,12 +8,14 @@ import pytest
 
 from decanter.hrccs.analysis import ComponentResult, _map_summary, _select_component
 from decanter.hrccs.config import (
+    AtmosphereConfig,
     HRCCSConfig,
     InjectionConfig,
     InputConfig,
     SearchConfig,
     SystemConfig,
 )
+from decanter.hrccs.models import TemplateFactory, _sample_instrument
 from decanter.wavecal.products import telluric_product
 
 
@@ -93,6 +95,58 @@ def test_search_grid_steps_must_be_positive():
         replace(config, search=SearchConfig(kp_step_kms=0.0)).validate()
     with pytest.raises(ValueError, match="null_realizations"):
         replace(config, injection=InjectionConfig(null_realizations=0)).validate()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("WIDE", 28_000.0), ("HIRES-Y", 68_000.0), ("HIRES-J", 68_000.0),
+     ("Y", 68_000.0), ("HIRES_J", 68_000.0)],
+)
+def test_template_resolution_follows_instrument_mode(mode, expected):
+    assert AtmosphereConfig().resolving_power_for(mode) == expected
+
+
+def test_explicit_template_resolution_overrides_mode():
+    atmosphere = AtmosphereConfig(resolving_power=45_000.0)
+    assert atmosphere.resolving_power_for("WIDE") == 45_000.0
+    with pytest.raises(ValueError, match="INSTMODE"):
+        AtmosphereConfig().resolving_power_for("UNKNOWN")
+
+
+@pytest.mark.parametrize(("mode", "resolution"), [("WIDE", 28_000.0),
+                                                    ("HIRES-Y", 68_000.0)])
+def test_per_order_template_records_native_grid_and_resolution(tmp_path, mode, resolution):
+    atmosphere = AtmosphereConfig(
+        backend="analytic", cache_dir=str(tmp_path), resolving_power=resolution,
+    )
+    system = SystemConfig(stellar_radius_rsun=1.0, planet_radius_rjup=1.0)
+    factory = TemplateFactory(system, atmosphere, instmode=mode)
+    first_wave = np.linspace(1.10, 1.11, 128)
+    second_wave = np.linspace(1.20, 1.21, 96)
+    first = factory.build("H2O", first_wave)
+    second = factory.build("H2O", second_wave)
+    np.testing.assert_array_equal(first.wavelength_um, first_wave)
+    np.testing.assert_array_equal(second.wavelength_um, second_wave)
+    assert first.wavelength_um.size != second.wavelength_um.size
+    assert first.metadata["instrument_mode"] == mode
+    assert first.metadata["resolving_power"] == resolution
+
+
+@pytest.mark.parametrize("resolution", [28_000.0, 68_000.0])
+def test_exojax_instrument_sampling_has_requested_resolution(resolution):
+    pytest.importorskip("exojax")
+    speed_of_light_kms = 299_792.458
+    nu = np.geomspace(9_900.0, 10_100.0, 65_536)
+    impulse = np.zeros(nu.size)
+    impulse[nu.size // 2] = 1.0
+    wavelength = 1.0e4 / nu[::-1]
+    sampled = _sample_instrument(nu, impulse, wavelength, resolution)[::-1]
+    velocity = speed_of_light_kms * np.log(nu / nu[nu.size // 2])
+    above_half_maximum = np.flatnonzero(sampled >= 0.5 * np.max(sampled))
+    measured_fwhm = (velocity[above_half_maximum[-1]]
+                     - velocity[above_half_maximum[0]])
+    expected_fwhm = speed_of_light_kms / resolution
+    assert measured_fwhm == pytest.approx(expected_fwhm, rel=0.03)
 
 
 def test_wavecal_telluric_product_is_continuous_and_unthresholded(tmp_path):

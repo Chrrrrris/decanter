@@ -115,6 +115,14 @@ First use may download them into `atmosphere.cache_dir`. The optional
 fields point to existing shared line-list and collision-induced-absorption
 caches.
 
+Templates remain per order. Each one is convolved with a Gaussian instrument
+profile and then sampled directly onto that order's calibrated wavelength
+grid. Unless `[atmosphere].resolving_power` is set explicitly, the pipeline
+reads `INSTMODE` from the Decanter products and uses the WINERED nominal
+resolution: `R=28,000` for WIDE and `R=68,000` for HIRES-Y/HIRES-J. The resolved
+mode and resolution are recorded in every template cache entry and in
+`summary.json`.
+
 The searched SVD rank is selected by the largest map S/N inside the configured
 local window around the expected planet location. The exact expected-cell value
 and unrestricted global maximum are also recorded, but do not select the rank.

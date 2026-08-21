@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -87,7 +87,9 @@ def run(config):
     mask = mask[retained]
     prepared = prepare_cube(flux, config.reduction.continuum_percentile,
                             config.reduction.continuum_window_pixels)
-    factory = TemplateFactory(config.system, config.atmosphere)
+    resolving_power = config.atmosphere.resolving_power_for(cube.instmode)
+    atmosphere = replace(config.atmosphere, resolving_power=resolving_power)
+    factory = TemplateFactory(config.system, atmosphere, instmode=cube.instmode)
     from tqdm.auto import tqdm
 
     results = []
@@ -103,7 +105,14 @@ def run(config):
             unit="order", leave=False, disable=not config.show_progress,
             dynamic_ncols=True,
         )
+        # Deliberately retain the per-order convention: each order gets its own
+        # line selection, Gaussian LSF convolution, and native-grid sampling.
         templates = [factory.build(species, wave) for wave in order_bar]
+        for template, wave in zip(templates, wavelength):
+            if template.metadata.get("resolving_power") != resolving_power:
+                raise RuntimeError("cached template has the wrong instrumental resolution")
+            if not np.array_equal(template.wavelength_um, wave):
+                raise RuntimeError("template is not sampled on its order wavelength grid")
         contrast = np.asarray([template.contrast for template in templates])
         depths = np.asarray([template.transit_depth for template in templates])
         result = run_species(
@@ -133,6 +142,8 @@ def run(config):
     summary = {
         "schema": "decanter.hrccs.v1", "target": orbit.target_name,
         "configuration": asdict(config), "orders": orders.tolist(),
+        "instrument_mode": cube.instmode,
+        "template_resolving_power": resolving_power,
         "berv_kms": [float(np.nanmin(orbit.berv_kms)), float(np.nanmax(orbit.berv_kms))],
         "stellar_rv_kms": orbit.stellar_rv_kms,
         "component_selection": {
