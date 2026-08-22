@@ -24,6 +24,7 @@ from decanter.hrccs.config import (
 )
 from decanter.hrccs.detrend import svd_path
 from decanter.hrccs.models import (
+    Template,
     TemplateFactory,
     _cia_supported_indices,
     _is_atomic,
@@ -250,6 +251,45 @@ def test_atomic_classifier_does_not_misclassify_diatomic_molecules():
     assert not _is_atomic("OH")
     assert not _is_atomic("CO")
     assert not _is_atomic("H2O")
+
+
+def test_wide_atomic_template_accepts_empty_internal_chunks(tmp_path):
+    atmosphere = AtmosphereConfig(
+        backend="analytic", cache_dir=str(tmp_path), resolving_power=28_000.0,
+    )
+    factory = TemplateFactory(
+        SystemConfig(stellar_radius_rsun=1.0, planet_radius_rjup=1.0),
+        atmosphere, instmode="WIDE",
+    )
+    wave = np.linspace(1.0, 1.1, 8)
+    common = {"backend": "exojax", "continuum": {"cia_grid_coverage": {}}}
+    pieces = [
+        Template("Mg", wave[:4], np.full(4, 0.01), np.zeros(4),
+                 {**common, "line_count": 0}),
+        Template("Mg", wave[4:], np.full(4, 0.01), np.arange(4.0),
+                 {**common, "line_count": 3}),
+    ]
+    stitched = factory._stitch_wide("Mg", wave, pieces, 4)
+    assert stitched.metadata["line_count"] == 3
+    np.testing.assert_array_equal(stitched.contrast[:4], 0.0)
+
+
+def test_wide_atomic_template_rejects_species_absent_from_full_band(tmp_path):
+    atmosphere = AtmosphereConfig(
+        backend="analytic", cache_dir=str(tmp_path), resolving_power=28_000.0,
+    )
+    factory = TemplateFactory(
+        SystemConfig(stellar_radius_rsun=1.0, planet_radius_rjup=1.0),
+        atmosphere, instmode="WIDE",
+    )
+    wave = np.linspace(1.0, 1.1, 8)
+    piece = Template(
+        "Mg", wave, np.full(8, 0.01), np.zeros(8),
+        {"backend": "exojax", "line_count": 0,
+         "continuum": {"cia_grid_coverage": {}}},
+    )
+    with pytest.raises(ValueError, match="no Mg lines across the full"):
+        factory._stitch_wide("Mg", wave, [piece], 8)
 
 
 def test_wavecal_telluric_product_is_continuous_and_unthresholded(tmp_path):

@@ -444,6 +444,11 @@ class TemplateFactory:
             raise RuntimeError(f"no wide-template chunks were computed for {species}")
         metadata = dict(pieces[0].metadata)
         line_counts = [int(piece.metadata.get("line_count", 0)) for piece in pieces]
+        if _is_atomic(species) and sum(line_counts) == 0:
+            raise ValueError(
+                f"Kurucz contains no {species} lines across the full wide-template "
+                f"range {wave[0]:.6f}-{wave[-1]:.6f} micron"
+            )
         coverage = {}
         for filename in ("H2-H2_2011.cia", "H2-He_2011.cia"):
             weighted = [
@@ -571,13 +576,19 @@ class TemplateFactory:
             adb = AdbKurucz(path, nurange=[nu_min, nu_max], margin=0.0,
                             crit=self.config.kurucz_line_strength_crit, gpu_transfer=True,
                             vmr_fraction=[0.0, 0.16, 0.84])
-            if np.asarray(getattr(adb, "nu_lines", [])).size == 0:
-                raise ValueError(f"Kurucz contains no {species} lines in this order")
-            opa = OpaDirect(adb, nu, wavelength_order="ascending")
-            xs = _kurucz_xsmatrix(opa, temperature, art.pressure)
-            molmass = float(np.nanmedian(np.asarray(adb.atomicmass)))
             source = f"Kurucz {path.name} via ExoJAX"
             line_count = int(np.asarray(adb.nu_lines).size)
+            if line_count:
+                opa = OpaDirect(adb, nu, wavelength_order="ascending")
+                xs = _kurucz_xsmatrix(opa, temperature, art.pressure)
+                molmass = float(np.nanmedian(np.asarray(adb.atomicmass)))
+            else:
+                # Sparse atomic line lists routinely leave some bounded-memory
+                # chunks empty.  Those chunks still need their atmospheric
+                # continuum; only an entirely line-free *wide* model is an
+                # error (checked by _stitch_wide).
+                xs = None
+                molmass = None
         else:
             from exojax.database.hitran.api import MdbHitran
             from exojax.database.multimol import database_path_hitran12
@@ -605,8 +616,11 @@ class TemplateFactory:
             molmass = float(mdb.molmass)
             source = f"HITRAN {species} via ExoJAX"
             line_count = int(np.asarray(mdb.nu_lines).size)
-        species_mmr = jnp.asarray(vmr[species] * molmass / mmw_np)
-        molecular_dtau = art.opacity_profile_xs(xs, species_mmr, molmass, gravity)
+        if xs is None:
+            molecular_dtau = jnp.zeros((self.config.n_layers, len(nu)))
+        else:
+            species_mmr = jnp.asarray(vmr[species] * molmass / mmw_np)
+            molecular_dtau = art.opacity_profile_xs(xs, species_mmr, molmass, gravity)
 
         continuum = jnp.zeros_like(molecular_dtau)
         cia_coverage = {}
