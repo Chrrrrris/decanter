@@ -1,0 +1,50 @@
+output_dir = "../outputs/hrccs_validation/wasp69b_pipeline"
+show_progress = true
+
+[input]
+decanter_dir = "../outputs/decanter_validation/wasp69b"
+
+[system]
+planet_name = "WASP-69 b"
+period_days = 3.8681382
+transit_midpoint_bjd_tdb = 2455748.834240741
+transit_duration_hours = 2.2296
+expected_kp_kms = 127.055
+ra_deg = 315.0242916667
+dec_deg = -5.0963611111
+stellar_rv_kms = -9.62826
+stellar_radius_rsun = 0.813
+planet_radius_rjup = 1.057
+planet_mass_mjup = 0.26
+equilibrium_temperature_k = 963.0
+metallicity_dex = 0.10
+
+[atmosphere]
+species = ["H2O"]
+cloud_top_pressure_bar = 0.03
+cache_dir = "~/.cache/decanter/hrccs"
+
+[reduction]
+telluric_threshold = 0.50
+svd_components = [10]
+
+[search]
+rv_min_kms = -140.0
+rv_max_kms = 140.0
+rv_step_kms = 2.0
+kp_min_kms = 0.0
+kp_max_kms = 250.0
+kp_step_kms = 2.0
+vsys_min_kms = -79.62826
+vsys_max_kms = 60.37174
+vsys_step_kms = 2.0
+local_kp_half_width_kms = 40.0
+local_vsys_half_width_kms = 25.0
+
+[injection]
+null_realizations = 5
+
+[plots]
+enabled = true
+orders_per_page = 5
+formats = ["pdf", "png"]

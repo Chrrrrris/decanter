@@ -19,6 +19,7 @@ from decanter.wavecal import (
     apply_solution_to_directory,
     load_series,
     solve,
+    telluric_product,
     wavecal_report_pdf,
 )
 from decanter.wavecal.config import AUTO_MODE, MODES
@@ -59,12 +60,15 @@ def main() -> None:
     print(f"wavecal mode: {config.mode} (requested {args.mode})", flush=True)
 
     wants_report = args.diagnostic_pdf is not None
-    result = solve(
-        series, config, verbose=not args.quiet, return_diagnostics=wants_report
-    )
-    solution = result.solution if wants_report else result
+    # Preserve the fitted atmospheric model long enough to serialize the
+    # continuous transmission product consumed by downstream HRCCS masks.
+    result = solve(series, config, verbose=not args.quiet, return_diagnostics=True)
+    solution = result.solution
     count = apply_solution_to_directory(
         solution, args.input_dir, args.output_dir, overwrite=args.overwrite
+    )
+    telluric_path = telluric_product(
+        result, args.output_dir / "telluric_transmission.npz"
     )
 
     report_path = None
@@ -88,11 +92,16 @@ def main() -> None:
         "fits_written": count,
         "finite_fraction": float(np.isfinite(solution.velocity).mean()),
         "coverage": coverage,
+        "telluric_product": (
+            str(telluric_path.resolve()) if telluric_path is not None else None
+        ),
         "diagnostic_pdf": str(report_path.resolve()) if report_path else None,
     }
     summary_path = args.output_dir / "wavecal_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     print(f"wrote {count} corrected FITS products to {args.output_dir}", flush=True)
+    if telluric_path is not None:
+        print(f"wrote telluric transmission to {telluric_path}", flush=True)
     if report_path:
         print(f"wrote diagnostic report to {report_path}", flush=True)
     print(f"wrote summary to {summary_path}", flush=True)
