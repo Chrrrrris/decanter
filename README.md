@@ -160,6 +160,83 @@ decanter-hrccs examples/hrccs/wasp69b.toml
 decanter-hrccs examples/hrccs/toi3486b.toml
 ```
 
+### Fresh reductions to HRCCS: TOI-2109b (two nights) and WASP-193b
+
+Yes: begin from the raw frames for each observing sequence, let `reduce.py`
+apply the original Decanter/WARP extraction and alignment followed by physical
+wavecal, and then run `decanter-hrccs` on that sequence's output directory.
+Treat separate nights as separate reductions and separate HRCCS analyses. Do
+not concatenate the two TOI-2109b nights before wavelength calibration or SVD;
+their instrumental drift, telluric spectrum, noise, and optimal SVD rank are
+night-specific.
+
+From the Decanter repository root, the current local data layout can be reduced
+with:
+
+```bash
+# TOI-2109b, take 1 (HIRES-Y -> auto selects hybrid_refit)
+python reduce.py \
+  --frames ../TOI2109 \
+  --listfile ../TOI2109/TOI2109.txt \
+  --calib ../TOI2109/2025_08_06/calibration_LCO25b_setting2_HIRES-Y100 \
+  --out ../outputs/decanter_hrccs_inputs/toi2109b_take1 \
+  --jobs 8 \
+  --wavecal auto \
+  --diagnostic-pdf
+
+# TOI-2109b, take 2 (HIRES-Y -> auto selects hybrid_refit)
+python reduce.py \
+  --frames ../TOI2109_take2 \
+  --listfile ../TOI2109_take2/TOI2109_take2.txt \
+  --calib ../TOI2109_take2/2025_08_10/calibration_LCO25b_setting4_HIRES-Y100 \
+  --out ../outputs/decanter_hrccs_inputs/toi2109b_take2 \
+  --jobs 8 \
+  --wavecal auto \
+  --diagnostic-pdf
+
+# WASP-193b (HIRES-Y -> auto selects hybrid_refit)
+python reduce.py \
+  --frames ../WASP193 \
+  --listfile ../WASP193/WASP193.txt \
+  --calib ../WASP193/2025_02_13/calibration_LCO25a_setting4_HIRES-Y100 \
+  --out ../outputs/decanter_hrccs_inputs/wasp193b \
+  --jobs 8 \
+  --wavecal auto \
+  --diagnostic-pdf
+```
+
+Use a new, empty `--out` directory for each run. `--overwrite` permits reuse
+of a non-empty directory, but a fresh directory is safer for a science run.
+After each reduction, confirm that the output root contains all of:
+
+```text
+warp_alignment.npz
+wavecal_solution.npz
+telluric_transmission.npz
+wavecal_diagnostics.pdf       # only when --diagnostic-pdf was requested
+```
+
+The telluric product is essential for the configured downstream mask. If it is
+absent, HRCCS warns and continues without masking telluric pixels; do not use
+such a run as the production result.
+
+Three matching HRCCS configurations are provided. Run them independently:
+
+```bash
+decanter-hrccs examples/hrccs/toi2109b_take1.toml
+decanter-hrccs examples/hrccs/toi2109b_take2.toml
+decanter-hrccs examples/hrccs/wasp193b.toml
+```
+
+The TOI-2109b configurations share the same literature system parameters but
+have different Decanter input and HRCCS output directories. The WASP-193b
+configuration adopts the Yee et al. (2025) system solution used by the local
+WASP-193b notebook. Before a definitive run, review the species list, cloud-top
+pressure, ephemeris, stellar systemic velocity, searched grids, and number of
+null realizations. Five nulls are suitable only for an end-to-end smoke test;
+a false-alarm probability intended for scientific interpretation needs many
+more realizations.
+
 The downstream HRCCS pipeline now uses the minimal-processing notebook method
 by default for every target: linear uncentered SVD of the flux cube, an exact
 SVD refit of the template injected multiplicatively into the low-rank scaling
