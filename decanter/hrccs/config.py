@@ -105,16 +105,16 @@ class ReductionConfig:
     # ``notebook`` reproduces the minimal-processing WASP-69b reference:
     # linear-flux SVD, exact injected-template SVD refit, and equal-order CCF
     # summation. ``projected_log`` retains the original packaged prototype.
-    analysis_mode: str = "projected_log"
+    analysis_mode: str = "notebook"
     continuum_percentile: float = 95.0
     continuum_window_pixels: int = 151
     telluric_threshold: float = 0.90
-    telluric_mask_scope: str = "all"
-    edge_trim_pixels: int = 30
-    ccf_lsf_margin_widths: float = 0.0
+    telluric_mask_scope: str = "in_transit"
+    edge_trim_pixels: int = 0
+    ccf_lsf_margin_widths: float = 3.0
     min_valid_pixels: int = 100
-    template_signal: str = "differential"
-    order_combination: str = "information"
+    template_signal: str = "absolute_depth"
+    order_combination: str = "equal"
     svd_components: tuple[int, ...] = tuple(range(1, 13))
 
 

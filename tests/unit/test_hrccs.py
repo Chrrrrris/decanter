@@ -6,15 +6,23 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from decanter.hrccs.analysis import ComponentResult, _map_summary, _select_component
+from decanter.hrccs.analysis import (
+    ComponentResult,
+    _filtered_cube,
+    _map_summary,
+    _select_component,
+    combine_order_ccfs,
+)
 from decanter.hrccs.config import (
     AtmosphereConfig,
     HRCCSConfig,
     InjectionConfig,
     InputConfig,
+    ReductionConfig,
     SearchConfig,
     SystemConfig,
 )
+from decanter.hrccs.detrend import svd_path
 from decanter.hrccs.models import (
     TemplateFactory,
     _cia_supported_indices,
@@ -85,6 +93,9 @@ def test_default_search_grids_and_local_window():
     assert config.search.local_vsys_half_width_kms == 15.0
     assert InjectionConfig().null_realizations == 5
     assert config.show_progress is True
+    assert config.reduction.analysis_mode == "notebook"
+    assert config.reduction.template_signal == "absolute_depth"
+    assert config.reduction.order_combination == "equal"
 
 
 def test_search_grid_steps_must_be_positive():
@@ -103,6 +114,57 @@ def test_search_grid_steps_must_be_positive():
         replace(config, injection=InjectionConfig(null_realizations=0)).validate()
     with pytest.raises(ValueError, match="wide_model_chunk_points"):
         replace(config, atmosphere=AtmosphereConfig(wide_model_chunk_points=255)).validate()
+
+
+def test_notebook_reduction_configuration_is_valid():
+    config = HRCCSConfig(
+        input=InputConfig("products"),
+        system=SystemConfig(
+            period_days=1.0, transit_midpoint_bjd_tdb=2_460_000.0,
+            transit_duration_hours=2.0, expected_kp_kms=200.0,
+        ),
+        reduction=ReductionConfig(
+            analysis_mode="notebook", telluric_mask_scope="in_transit",
+            edge_trim_pixels=0, ccf_lsf_margin_widths=3.0,
+            template_signal="absolute_depth", order_combination="equal",
+        ),
+    )
+    config.validate()
+
+
+def test_notebook_svd_is_linear_uncentered_svd():
+    rng = np.random.default_rng(42)
+    matrix = 10.0 + rng.normal(size=(9, 17))
+    path = svd_path(matrix, (3,), np.ones(matrix.shape[1], bool), mode="notebook")
+    u, singular, vt = np.linalg.svd(matrix, full_matrices=False)
+    expected_lower = (u[:, :3] * singular[:3]) @ vt[:3]
+    np.testing.assert_allclose(path.lower[3], expected_lower, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        path.residuals[3], matrix - expected_lower, rtol=1e-13, atol=1e-13
+    )
+
+
+def test_notebook_template_filter_is_exact_injected_svd_refit():
+    rng = np.random.default_rng(7)
+    matrix = 1000.0 + rng.normal(size=(10, 23))
+    path = svd_path(matrix, (2,), np.ones(matrix.shape[1], bool), mode="notebook")
+    model = np.zeros((10, 1, 23))
+    model[3:7, 0, 8:15] = -2.0e-3
+    actual = _filtered_cube(model, (path,), 2, "notebook")[:, 0]
+
+    scaling = path.lower[2]
+    injected_path = svd_path(
+        scaling * (1.0 + model[:, 0]), (2,), np.ones(23, bool), mode="notebook"
+    )
+    control_path = svd_path(scaling, (2,), np.ones(23, bool), mode="notebook")
+    expected = injected_path.residuals[2] - control_path.residuals[2]
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_equal_order_combination_matches_notebook_sum():
+    order_ccf = np.array([[[1.0, 2.0]], [[3.0, np.nan]], [[-1.0, 4.0]]])
+    actual = combine_order_ccfs(order_ccf, np.ones(3), mode="equal")
+    np.testing.assert_allclose(actual, [[3.0, 6.0]])
 
 
 @pytest.mark.parametrize(
@@ -149,8 +211,11 @@ def test_wide_grid_oversamples_instrument_resolution(resolution):
     wave = _wide_wavelength_grid(orders, resolution)
     samples_per_fwhm = 1.0 / (resolution * np.max(np.diff(np.log(wave))))
     assert samples_per_fwhm >= 4.99
-    assert wave[0] == pytest.approx(0.95)
-    assert wave[-1] == pytest.approx(1.30)
+    assert wave[0] < 0.95
+    assert wave[-1] > 1.30
+    margin = 350.0 / 299_792.458
+    assert wave[0] == pytest.approx(0.95 * (1.0 - margin))
+    assert wave[-1] == pytest.approx(1.30 * (1.0 + margin))
 
 
 @pytest.mark.parametrize("resolution", [28_000.0, 68_000.0])

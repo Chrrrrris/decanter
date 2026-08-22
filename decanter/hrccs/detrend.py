@@ -11,6 +11,7 @@ from scipy.ndimage import percentile_filter
 @dataclass(frozen=True)
 class SVDPath:
     prepared: np.ndarray
+    lower: dict[int, np.ndarray]
     residuals: dict[int, np.ndarray]
     u: np.ndarray
     valid: np.ndarray
@@ -38,31 +39,49 @@ def prepare_cube(flux: np.ndarray, percentile: float, window: int) -> np.ndarray
     return out
 
 
-def svd_path(matrix: np.ndarray, counts: tuple[int, ...], pixel_mask: np.ndarray) -> SVDPath:
+def svd_path(matrix: np.ndarray, counts: tuple[int, ...], pixel_mask: np.ndarray,
+             *, mode: str = "projected_log") -> SVDPath:
     values = np.asarray(matrix, dtype=float)
     valid = np.isfinite(values) & pixel_mask[None, :]
-    usable_columns = pixel_mask & (np.sum(np.isfinite(values), axis=0) >= max(3, values.shape[0] // 2))
+    if mode == "notebook":
+        usable_rows = np.any(valid, axis=1)
+        usable_columns = pixel_mask & np.any(valid[usable_rows], axis=0)
+    else:
+        usable_rows = np.ones(values.shape[0], dtype=bool)
+        usable_columns = pixel_mask & (
+            np.sum(np.isfinite(values), axis=0) >= max(3, values.shape[0] // 2)
+        )
     if np.count_nonzero(usable_columns) < 3:
         raise ValueError("too few valid pixels for SVD")
-    local = values[:, usable_columns]
+    local = values[np.ix_(usable_rows, usable_columns)]
     column_fill = np.nanmedian(local, axis=0)
+    if mode == "notebook":
+        global_fill = float(np.nanmedian(local))
+        column_fill = np.where(np.isfinite(column_fill), column_fill, global_fill)
     prepared = np.where(np.isfinite(local), local, column_fill[None, :])
-    # Work in fractional/log space, as in the reference notebooks.
-    prepared = np.log(np.clip(prepared, 1.0e-6, None))
-    prepared -= np.nanmedian(prepared, axis=0, keepdims=True)
+    if mode == "projected_log":
+        prepared = np.log(np.clip(prepared, 1.0e-6, None))
+        prepared -= np.nanmedian(prepared, axis=0, keepdims=True)
+    elif mode != "notebook":
+        raise ValueError(f"unknown SVD mode {mode!r}")
     u, singular, vt = np.linalg.svd(prepared, full_matrices=False)
+    lowers: dict[int, np.ndarray] = {}
     residuals: dict[int, np.ndarray] = {}
     full_prepared = np.full_like(values, np.nan)
-    full_prepared[:, usable_columns] = prepared
+    full_prepared[np.ix_(usable_rows, usable_columns)] = prepared
     for count in sorted(set(counts)):
         count = min(int(count), u.shape[1])
         lower = (u[:, :count] * singular[:count]) @ vt[:count] if count else 0.0
         local_residual = prepared - lower
+        full_lower = np.full_like(values, np.nan)
         full = np.full_like(values, np.nan)
-        full[:, usable_columns] = local_residual
+        full_lower[np.ix_(usable_rows, usable_columns)] = lower
+        full[np.ix_(usable_rows, usable_columns)] = local_residual
+        full_lower[~valid] = np.nan
         full[~valid] = np.nan
+        lowers[count] = full_lower
         residuals[count] = full
-    return SVDPath(full_prepared, residuals, u, valid)
+    return SVDPath(full_prepared, lowers, residuals, u, valid)
 
 
 def apply_time_projection(model: np.ndarray, u: np.ndarray, count: int) -> np.ndarray:

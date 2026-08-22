@@ -56,14 +56,21 @@ def shift_template(wave_um, template, velocity_kms):
 
 
 def planet_model_cube(wavelength_um, templates, phase, berv_kms, kp_kms, vsys_kms,
-                      transit_weight, scale=1.0):
+                      transit_weight, scale=1.0, *, wide_wavelength_um=None,
+                      wide_template=None):
     n_frames = phase.size
     out = np.full((n_frames,) + templates.shape, np.nan)
     velocity = kp_kms * np.sin(2.0 * np.pi * phase) + vsys_kms - berv_kms
     for i in range(n_frames):
         for j in range(templates.shape[0]):
-            out[i, j] = (scale * transit_weight[i]
-                         * shift_template(wavelength_um[j], templates[j], velocity[i]))
+            if wide_wavelength_um is None:
+                shifted = shift_template(wavelength_um[j], templates[j], velocity[i])
+            else:
+                sample = wavelength_um[j] / relativistic_factor(velocity[i])
+                shifted = np.interp(
+                    sample, wide_wavelength_um, wide_template, left=np.nan, right=np.nan
+                )
+            out[i, j] = scale * transit_weight[i] * shifted
     return out
 
 
@@ -84,7 +91,13 @@ def fixed_pearson_ccf(data, model, wave, rv_grid, fixed_mask):
     return output
 
 
-def combine_order_ccfs(order_ccf, information):
+def combine_order_ccfs(order_ccf, information, mode="information"):
+    if mode == "equal":
+        selected = np.asarray(order_ccf, dtype=float)
+        combined = np.nansum(selected, axis=0)
+        return np.where(np.any(np.isfinite(selected), axis=0), combined, np.nan)
+    if mode != "information":
+        raise ValueError(f"unknown order-combination mode {mode!r}")
     weights = np.sqrt(np.maximum(np.asarray(information, dtype=float), 0.0))
     weights[~np.isfinite(weights)] = 0.0
     if not np.any(weights > 0):
@@ -160,7 +173,8 @@ def _map_summary(snr_map, kp_grid, vsys_grid, expected_kp, expected_vsys,
 
 def evaluate(count, residual_cube, filtered_model, wavelength_um, mask, phase,
              transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys,
-             sigma_clip, local_kp_half_width, local_vsys_half_width):
+             sigma_clip, local_kp_half_width, local_vsys_half_width,
+             order_combination="information"):
     order_ccf = []
     information = []
     for order in range(residual_cube.shape[1]):
@@ -170,7 +184,9 @@ def evaluate(count, residual_cube, filtered_model, wavelength_um, mask, phase,
         ))
         information.append(np.nansum(np.where(mask[order][None, :],
                                               filtered_model[:, order], np.nan) ** 2))
-    combined = combine_order_ccfs(np.asarray(order_ccf), information)
+    combined = combine_order_ccfs(
+        np.asarray(order_ccf), information, mode=order_combination
+    )
     raw = kp_vsys_map(combined, rv_grid, phase, transit_weight, kp_grid, vsys_grid,
                       expected_kp, expected_vsys)
     snr = standardize_map(raw, sigma=sigma_clip)
@@ -183,10 +199,14 @@ def evaluate(count, residual_cube, filtered_model, wavelength_um, mask, phase,
                            peak, peak_kp, peak_vsys)
 
 
-def _paths(prepared, mask, counts):
+def _paths(prepared, mask, counts, analysis_mode):
     paths = []
     for order in range(prepared.shape[1]):
-        paths.append(svd_path(prepared[:, order], counts, mask[order]))
+        svd_mask = (np.ones(mask.shape[1], dtype=bool)
+                    if analysis_mode == "notebook" else mask[order])
+        paths.append(svd_path(
+            prepared[:, order], counts, svd_mask, mode=analysis_mode
+        ))
     return tuple(paths)
 
 
@@ -194,9 +214,33 @@ def _residual_cube(paths, count):
     return np.stack([path.residuals[min(count, max(path.residuals))] for path in paths], axis=1)
 
 
-def _filtered_cube(model, paths, count):
-    return np.stack([apply_time_projection(model[:, order], path.u, count)
-                     for order, path in enumerate(paths)], axis=1)
+def _filtered_cube(model, paths, count, analysis_mode):
+    if analysis_mode == "projected_log":
+        return np.stack([apply_time_projection(model[:, order], path.u, count)
+                         for order, path in enumerate(paths)], axis=1)
+    if analysis_mode != "notebook":
+        raise ValueError(f"unknown analysis mode {analysis_mode!r}")
+
+    # Reproduce the notebook's exact template transfer.  The moving absolute
+    # depth is multiplied into the rank-N stellar/telluric scaling matrix;
+    # both the injected and uninjected scaling matrices are independently
+    # refit by an N-component SVD, and their residual difference is the CCF
+    # template.  This is deliberately not the first-order U U^T projection.
+    filtered = []
+    for order, path in enumerate(paths):
+        scaling = path.lower[min(count, max(path.lower))]
+        svd_mask = np.ones(scaling.shape[1], dtype=bool)
+        injected = scaling * (1.0 + model[:, order])
+        injected_path = svd_path(
+            injected, (count,), svd_mask, mode="notebook"
+        )
+        control_path = svd_path(
+            scaling, (count,), svd_mask, mode="notebook"
+        )
+        filtered.append(
+            injected_path.residuals[count] - control_path.residuals[count]
+        )
+    return np.stack(filtered, axis=1)
 
 
 def _select_component(components):
@@ -210,7 +254,9 @@ def _select_component(components):
 def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, berv_kms,
                 transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys,
                 counts, sigma_clip, local_kp_half_width, local_vsys_half_width,
-                injection_scale, seed, null_realizations, *, show_progress=True):
+                injection_scale, seed, null_realizations, *,
+                analysis_mode="projected_log", order_combination="information",
+                wide_wavelength_um=None, wide_template=None, show_progress=True):
     from tqdm.auto import tqdm
 
     progress = tqdm(
@@ -223,16 +269,18 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
     expected_model = planet_model_cube(
         wavelength_um, raw_templates, phase, berv_kms, expected_kp, expected_vsys,
         transit_weight, scale=injection_scale,
+        wide_wavelength_um=wide_wavelength_um, wide_template=wide_template,
     )
-    paths = _paths(prepared, mask, counts)
+    paths = _paths(prepared, mask, counts, analysis_mode)
     components = []
     for count in counts:
         progress.set_postfix_str(f"observed rank {count}", refresh=False)
         components.append(evaluate(
-            count, _residual_cube(paths, count), _filtered_cube(expected_model, paths, count),
+            count, _residual_cube(paths, count),
+            _filtered_cube(expected_model, paths, count, analysis_mode),
             wavelength_um, mask, phase, transit_weight, rv_grid, kp_grid, vsys_grid,
             expected_kp, expected_vsys, sigma_clip,
-            local_kp_half_width, local_vsys_half_width,
+            local_kp_half_width, local_vsys_half_width, order_combination,
         ))
         progress.update()
     selected = _select_component(components)
@@ -254,18 +302,21 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
     baseline = np.nanmedian(prepared[oot], axis=0)
     def synthetic(model, local_seed):
         local_rng = np.random.default_rng(local_seed)
-        return baseline[None, :, :] + model + local_rng.normal(
+        signal = (baseline[None, :, :] * model
+                  if analysis_mode == "notebook" else model)
+        return baseline[None, :, :] + signal + local_rng.normal(
             0.0, noise_sigma[None, :, :], size=prepared.shape
         )
 
     injected_data = synthetic(expected_model, seed)
-    injected_paths = _paths(injected_data, mask, (selected.count,))
+    injected_paths = _paths(injected_data, mask, (selected.count,), analysis_mode)
     progress.set_postfix_str(f"injection rank {selected.count}", refresh=False)
     injected = evaluate(
         selected.count, _residual_cube(injected_paths, selected.count),
-        _filtered_cube(expected_model, injected_paths, selected.count), wavelength_um, mask,
+        _filtered_cube(expected_model, injected_paths, selected.count, analysis_mode),
+        wavelength_um, mask,
         phase, transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys, sigma_clip,
-        local_kp_half_width, local_vsys_half_width,
+        local_kp_half_width, local_vsys_half_width, order_combination,
     )
     progress.update()
     null_maps, null_expected, null_local = [], [], []
@@ -274,13 +325,14 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
             f"null {index + 1}/{null_realizations}, rank {selected.count}", refresh=False
         )
         null_data = synthetic(np.zeros_like(expected_model), seed + 1000 + index)
-        null_paths = _paths(null_data, mask, (selected.count,))
+        null_paths = _paths(null_data, mask, (selected.count,), analysis_mode)
         null = evaluate(
             selected.count, _residual_cube(null_paths, selected.count),
-            _filtered_cube(expected_model, null_paths, selected.count), wavelength_um, mask,
+            _filtered_cube(expected_model, null_paths, selected.count, analysis_mode),
+            wavelength_um, mask,
             phase, transit_weight, rv_grid, kp_grid, vsys_grid,
             expected_kp, expected_vsys, sigma_clip,
-            local_kp_half_width, local_vsys_half_width,
+            local_kp_half_width, local_vsys_half_width, order_combination,
         )
         # Match the injection recovery: every null uses the rank selected from
         # the observed data, without re-tuning on the null realization.

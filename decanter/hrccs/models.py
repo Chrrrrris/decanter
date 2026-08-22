@@ -303,7 +303,8 @@ def _cia_supported_indices(nu, cia_nu):
     return np.flatnonzero((values >= support[0]) & (values < support[-1]))
 
 
-def _wide_wavelength_grid(order_wavelengths, resolving_power, samples_per_fwhm=5.0):
+def _wide_wavelength_grid(order_wavelengths, resolving_power, samples_per_fwhm=5.0,
+                          doppler_margin_kms=350.0):
     """Oversampled log-lambda grid spanning every retained echelle order."""
     parts = [np.asarray(order, dtype=float).ravel() for order in order_wavelengths]
     finite = np.concatenate([
@@ -311,7 +312,9 @@ def _wide_wavelength_grid(order_wavelengths, resolving_power, samples_per_fwhm=5
     ])
     if finite.size < 2:
         raise ValueError("cannot construct a wide template from fewer than two wavelengths")
-    lower, upper = float(np.min(finite)), float(np.max(finite))
+    margin = float(doppler_margin_kms) / C_KMS
+    lower = float(np.min(finite)) * (1.0 - margin)
+    upper = float(np.max(finite)) * (1.0 + margin)
     samples = max(
         2,
         int(np.ceil(samples_per_fwhm * resolving_power * np.log(upper / lower))) + 1,
@@ -461,6 +464,7 @@ class TemplateFactory:
             "wide_wavelength_max_um": float(wave[-1]),
             "wide_grid_points": int(wave.size),
             "wide_samples_per_resolution_fwhm": 5.0,
+            "wide_doppler_margin_kms": 350.0,
             "wide_model_chunks": len(pieces),
             "wide_model_chunk_points": chunk_points,
         })

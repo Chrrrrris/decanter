@@ -28,21 +28,27 @@ def _json_ready(value):
     return value
 
 
-def _mask(cube, config, rv_grid):
+def _mask(cube, config, rv_grid, in_transit, resolving_power):
     n_orders, n_pixels = cube.wavelength_um.shape
     keep = np.ones((n_orders, n_pixels), dtype=bool)
     if cube.telluric_transmission is None:
         warnings.warn("telluric_transmission.npz is absent; no telluric pixels are masked",
                       RuntimeWarning, stacklevel=2)
     else:
-        finite = np.isfinite(cube.telluric_transmission)
-        minimum = np.min(np.where(finite, cube.telluric_transmission, np.inf), axis=0)
+        rows = (np.asarray(in_transit, dtype=bool)
+                if config.telluric_mask_scope == "in_transit"
+                else np.ones(cube.flux.shape[0], dtype=bool))
+        transmission = cube.telluric_transmission[rows]
+        finite = np.isfinite(transmission)
+        minimum = np.min(np.where(finite, transmission, np.inf), axis=0)
         minimum[~np.any(finite, axis=0)] = np.nan
         keep &= np.isfinite(minimum) & (minimum >= config.telluric_threshold)
     for order in range(n_orders):
         wave = cube.wavelength_um[order]
         dv = 299_792.458 * np.nanmedian(np.diff(np.log(wave)))
-        margin = config.edge_trim_pixels + int(np.ceil(np.max(np.abs(rv_grid)) / abs(dv)))
+        velocity_margin = (np.max(np.abs(rv_grid))
+                           + config.ccf_lsf_margin_widths * 299_792.458 / resolving_power)
+        margin = config.edge_trim_pixels + int(np.ceil(velocity_margin / abs(dv)))
         keep[order, :min(margin, n_pixels)] = False
         keep[order, max(0, n_pixels - margin):] = False
         if np.count_nonzero(keep[order]) < config.min_valid_pixels:
@@ -79,15 +85,19 @@ def run(config):
     orbit = build_orbit(config.system, cube.time_jd_utc, cube.metadata,
                         Path(config.atmosphere.cache_dir).expanduser() / "simbad")
     rv_grid, kp_grid, vsys_grid = config.grids(orbit.stellar_rv_kms)
-    mask = _mask(cube, config.reduction, rv_grid)
+    resolving_power = config.atmosphere.resolving_power_for(cube.instmode)
+    mask = _mask(
+        cube, config.reduction, rv_grid, orbit.in_transit, resolving_power
+    )
     retained = np.sum(mask, axis=1) >= config.reduction.min_valid_pixels
     wavelength = cube.wavelength_um[retained]
     flux = cube.flux[:, retained]
     orders = cube.orders[retained]
     mask = mask[retained]
-    prepared = prepare_cube(flux, config.reduction.continuum_percentile,
-                            config.reduction.continuum_window_pixels)
-    resolving_power = config.atmosphere.resolving_power_for(cube.instmode)
+    prepared = (np.asarray(flux, dtype=float).copy()
+                if config.reduction.analysis_mode == "notebook"
+                else prepare_cube(flux, config.reduction.continuum_percentile,
+                                  config.reduction.continuum_window_pixels))
     atmosphere = replace(config.atmosphere, resolving_power=resolving_power)
     factory = TemplateFactory(config.system, atmosphere, instmode=cube.instmode)
     from tqdm.auto import tqdm
@@ -111,15 +121,25 @@ def run(config):
                 raise RuntimeError("template is not sampled on its order wavelength grid")
         contrast = np.asarray([template.contrast for template in templates])
         depths = np.asarray([template.transit_depth for template in templates])
+        raw_template = (-depths if config.reduction.template_signal == "absolute_depth"
+                        else contrast)
+        wide_signal = (-wide_template.transit_depth
+                       if config.reduction.template_signal == "absolute_depth"
+                       else wide_template.contrast)
         result = run_species(
-            species, prepared, wavelength, contrast, mask, orbit.phase, orbit.berv_kms,
+            species, prepared, wavelength, raw_template, mask, orbit.phase, orbit.berv_kms,
             orbit.transit_weight, rv_grid, kp_grid, vsys_grid,
             config.system.expected_kp_kms, orbit.stellar_rv_kms,
             config.reduction.svd_components, config.search.map_sigma_clip,
             config.search.local_kp_half_width_kms,
             config.search.local_vsys_half_width_kms,
             config.injection.scale, config.injection.random_seed + species_index * 100_000,
-            config.injection.null_realizations, show_progress=config.show_progress,
+            config.injection.null_realizations,
+            analysis_mode=config.reduction.analysis_mode,
+            order_combination=config.reduction.order_combination,
+            wide_wavelength_um=wide_template.wavelength_um,
+            wide_template=wide_signal,
+            show_progress=config.show_progress,
         )
         results.append(result)
         _save_result(result, output, orbit, rv_grid, kp_grid, vsys_grid)
@@ -140,6 +160,7 @@ def run(config):
         "configuration": asdict(config), "orders": orders.tolist(),
         "instrument_mode": cube.instmode,
         "template_resolving_power": resolving_power,
+        "analysis_mode": config.reduction.analysis_mode,
         "berv_kms": [float(np.nanmin(orbit.berv_kms)), float(np.nanmax(orbit.berv_kms))],
         "stellar_rv_kms": orbit.stellar_rv_kms,
         "component_selection": {
