@@ -135,7 +135,8 @@ def test_notebook_reduction_configuration_is_valid():
 def test_notebook_svd_is_linear_uncentered_svd():
     rng = np.random.default_rng(42)
     matrix = 10.0 + rng.normal(size=(9, 17))
-    path = svd_path(matrix, (3,), np.ones(matrix.shape[1], bool), mode="notebook")
+    # The notebook convention is the public helper's canonical default.
+    path = svd_path(matrix, (3,), np.ones(matrix.shape[1], bool))
     u, singular, vt = np.linalg.svd(matrix, full_matrices=False)
     expected_lower = (u[:, :3] * singular[:3]) @ vt[:3]
     np.testing.assert_allclose(path.lower[3], expected_lower, rtol=1e-13, atol=1e-13)
@@ -163,7 +164,8 @@ def test_notebook_template_filter_is_exact_injected_svd_refit():
 
 def test_equal_order_combination_matches_notebook_sum():
     order_ccf = np.array([[[1.0, 2.0]], [[3.0, np.nan]], [[-1.0, 4.0]]])
-    actual = combine_order_ccfs(order_ccf, np.ones(3), mode="equal")
+    # Equal per-order summation is the notebook convention and canonical default.
+    actual = combine_order_ccfs(order_ccf, np.ones(3))
     np.testing.assert_allclose(actual, [[3.0, 6.0]])
 
 

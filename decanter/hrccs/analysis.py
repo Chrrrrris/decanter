@@ -91,7 +91,7 @@ def fixed_pearson_ccf(data, model, wave, rv_grid, fixed_mask):
     return output
 
 
-def combine_order_ccfs(order_ccf, information, mode="information"):
+def combine_order_ccfs(order_ccf, information, mode="equal"):
     if mode == "equal":
         selected = np.asarray(order_ccf, dtype=float)
         combined = np.nansum(selected, axis=0)
@@ -174,7 +174,7 @@ def _map_summary(snr_map, kp_grid, vsys_grid, expected_kp, expected_vsys,
 def evaluate(count, residual_cube, filtered_model, wavelength_um, mask, phase,
              transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys,
              sigma_clip, local_kp_half_width, local_vsys_half_width,
-             order_combination="information"):
+             order_combination="equal"):
     order_ccf = []
     information = []
     for order in range(residual_cube.shape[1]):
@@ -255,7 +255,7 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
                 transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys,
                 counts, sigma_clip, local_kp_half_width, local_vsys_half_width,
                 injection_scale, seed, null_realizations, *,
-                analysis_mode="projected_log", order_combination="information",
+                analysis_mode="notebook", order_combination="equal",
                 wide_wavelength_um=None, wide_template=None, show_progress=True):
     from tqdm.auto import tqdm
 

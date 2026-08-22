@@ -40,7 +40,7 @@ def prepare_cube(flux: np.ndarray, percentile: float, window: int) -> np.ndarray
 
 
 def svd_path(matrix: np.ndarray, counts: tuple[int, ...], pixel_mask: np.ndarray,
-             *, mode: str = "projected_log") -> SVDPath:
+             *, mode: str = "notebook") -> SVDPath:
     values = np.asarray(matrix, dtype=float)
     valid = np.isfinite(values) & pixel_mask[None, :]
     if mode == "notebook":

@@ -160,7 +160,15 @@ decanter-hrccs examples/hrccs/wasp69b.toml
 decanter-hrccs examples/hrccs/toi3486b.toml
 ```
 
-The WASP-69b notebook-matching validation profile is also included:
+The downstream HRCCS pipeline now uses the minimal-processing notebook method
+by default for every target: linear uncentered SVD of the flux cube, an exact
+SVD refit of the template injected multiplicatively into the low-rank scaling
+cube, fixed-interior Pearson CCFs, and equal-order summation. The
+`absolute_depth` template includes wavelength-dependent continuum opacity; the
+SVD removes its constant component.
+
+The WASP-69b notebook-matching validation profile and independent numerical
+cross-check are also included:
 
 ```bash
 decanter-hrccs examples/hrccs/wasp69b_matched_validation.toml
@@ -168,14 +176,10 @@ python scripts/compare_hrccs_notebook_reference.py \
     examples/hrccs/wasp69b_matched_validation.toml
 ```
 
-Its `[reduction] analysis_mode = "notebook"` path uses the conventions of the
-minimal-processing reference notebook: linear uncentered SVD of the flux cube,
-an exact SVD refit of the template injected multiplicatively into the low-rank
-scaling cube, fixed-interior Pearson CCFs, and equal-order summation. The
-`absolute_depth` template includes the wavelength-dependent continuum opacity;
-the SVD removes its constant component. The earlier packaged prototype remains
-available as `analysis_mode = "projected_log"` with `template_signal =
-"differential"` and `order_combination = "information"`.
+The earlier projected-log implementation remains available only as an explicit
+legacy/experimental configuration (`analysis_mode = "projected_log"`,
+`template_signal = "differential"`, and `order_combination = "information"`);
+it is not used by the standard examples or by default API calls.
 
 `decanter.combine(series)` detects the per-exposure physical WCS differences
 and resamples onto the first reduction's corrected grid before stacking.
