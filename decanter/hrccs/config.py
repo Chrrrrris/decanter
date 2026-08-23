@@ -73,9 +73,18 @@ class AtmosphereConfig:
     line_strength_crit: float = 1.0e-30
     kurucz_line_strength_crit: float = 0.0
     hitran_isotope: int = 1
+    # Per-species values may be "auto", "hitran", or "exomol". Auto keeps
+    # HITRAN-supported molecules on HITRAN and sends other molecules to
+    # ExoMol. FeH and CrH default to their MoLLIST ExoMol databases.
+    opacity_databases: dict[str, str] = field(default_factory=dict)
+    # Optional ExoMol dataset below <exomol_dir>/<species>/, for example
+    # {CrH = "52Cr-1H/MoLLIST"}. Unspecified species use ExoMol's recommended
+    # stable-isotopologue dataset.
+    exomol_datasets: dict[str, str] = field(default_factory=dict)
     fastchem_abundance_file: str | None = None
     fastchem_logk_file: str | None = None
     hitran_dir: str | None = None
+    exomol_dir: str | None = None
     cia_dir: str | None = None
     kurucz_dir: str | None = None
     cache_dir: str = "~/.cache/decanter/hrccs"
@@ -175,6 +184,22 @@ class HRCCSConfig:
             raise ValueError("atmosphere wide_model_chunk_points must be at least 256")
         if self.atmosphere.atomic_wide_model_chunk_points < 256:
             raise ValueError("atmosphere atomic_wide_model_chunk_points must be at least 256")
+        invalid_databases = {
+            species: database
+            for species, database in self.atmosphere.opacity_databases.items()
+            if str(database).lower() not in {"auto", "hitran", "exomol"}
+        }
+        if invalid_databases:
+            raise ValueError(
+                "atmosphere opacity_databases values must be auto, hitran, or exomol: "
+                f"{invalid_databases}"
+            )
+        for species, dataset in self.atmosphere.exomol_datasets.items():
+            path = Path(dataset)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(
+                    f"atmosphere exomol_datasets[{species!r}] must be a relative path"
+                )
         counts = self.reduction.svd_components
         if not counts or min(counts) < 0 or len(set(counts)) != len(counts):
             raise ValueError("svd_components must be unique non-negative integers")

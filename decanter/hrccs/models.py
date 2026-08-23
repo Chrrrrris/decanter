@@ -27,6 +27,20 @@ R_JUP_CM = 7.1492e9
 R_SUN_CM = 6.957e10
 K_B_CGS = 1.380649e-16
 
+DEFAULT_EXOMOL_DATASETS = {
+    "FeH": "56Fe-1H/MoLLIST",
+    "CrH": "52Cr-1H/MoLLIST",
+}
+HITRAN_MOLECULES = frozenset({
+    "C2H2", "C2H4", "C2H6", "C2N2", "C4H2", "CF4", "CH3Br", "CH3CN",
+    "CH3Cl", "CH3F", "CH3I", "CH3OH", "CH4", "CO", "CO2", "COCl2",
+    "COF2", "CS", "CS2", "ClO", "ClONO2", "GeH4", "H2", "H2CO", "H2O",
+    "H2O2", "H2S", "HBr", "HC3N", "HCN", "HCOOH", "HCl", "HF", "HI",
+    "HNO3", "HO2", "HOBr", "HOCl", "N2", "N2O", "NF3", "NH3", "NO",
+    "NO+", "NO2", "O", "O2", "O3", "OCS", "OH", "PH3", "SF6", "SO",
+    "SO2", "SO3",
+})
+
 
 @dataclass(frozen=True)
 class Template:
@@ -207,6 +221,39 @@ def _is_atomic(species: str) -> bool:
     # Element symbols contain one capital followed by at most one lowercase
     # letter. Uppercase diatomics such as OH, CO, and NO are molecules.
     return re.fullmatch(r"[A-Z][a-z]?\+*", species) is not None
+
+
+def _molecular_database(species: str, configured: dict[str, str]) -> str:
+    """Choose HITRAN first when available, otherwise ExoMol."""
+    choice = str(configured.get(species, "auto")).strip().lower()
+    if choice in {"hitran", "exomol"}:
+        return choice
+    if choice != "auto":
+        raise ValueError(
+            f"opacity database for {species} must be auto, hitran, or exomol"
+        )
+    if species in DEFAULT_EXOMOL_DATASETS:
+        return "exomol"
+    return "hitran" if species in HITRAN_MOLECULES else "exomol"
+
+
+def _exomol_path(species: str, root: Path, configured: dict[str, str]) -> Path:
+    """Resolve a configured or recommended ExoMol isotopologue dataset."""
+    dataset = configured.get(species, DEFAULT_EXOMOL_DATASETS.get(species))
+    if dataset:
+        relative = Path(dataset)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"ExoMol dataset for {species} must be a relative path")
+        if not relative.parts or relative.parts[0] != species:
+            relative = Path(species) / relative
+        return root / relative
+
+    from exojax.database.multimol import database_path_exomol
+
+    relative = database_path_exomol(species, database_root_path=str(root))
+    if not relative or str(relative).endswith("/False"):
+        raise ValueError(f"ExoMol has no recommended line list for {species}")
+    return root / relative
 
 
 def _atomic_parts(species: str) -> tuple[str, int]:
@@ -444,9 +491,10 @@ class TemplateFactory:
             raise RuntimeError(f"no wide-template chunks were computed for {species}")
         metadata = dict(pieces[0].metadata)
         line_counts = [int(piece.metadata.get("line_count", 0)) for piece in pieces]
-        if _is_atomic(species) and sum(line_counts) == 0:
+        if metadata.get("backend") == "exojax" and sum(line_counts) == 0:
             raise ValueError(
-                f"Kurucz contains no {species} lines across the full wide-template "
+                f"the selected opacity database contains no {species} lines across "
+                f"the full wide-template "
                 f"range {wave[0]:.6f}-{wave[-1]:.6f} micron"
             )
         coverage = {}
@@ -590,32 +638,67 @@ class TemplateFactory:
                 xs = None
                 molmass = None
         else:
-            from exojax.database.hitran.api import MdbHitran
-            from exojax.database.multimol import database_path_hitran12
-            hitran_root = (Path(self.config.hitran_dir).expanduser()
-                           if self.config.hitran_dir else self.cache / "hitran")
-            path = hitran_root / database_path_hitran12(species)
-            cached_tables = tuple(path.parent.glob("*.hdf5")) if path.parent.exists() else ()
-            if not path.exists() and not cached_tables:
-                from tqdm.auto import tqdm
-                tqdm.write(
-                    f"Downloading HITRAN line data for {species} via ExoJAX -> {path}",
-                    file=sys.__stderr__ or sys.stderr,
+            database = _molecular_database(species, self.config.opacity_databases)
+            if database == "exomol":
+                from exojax.database.exomol.api import MdbExomol
+
+                exomol_root = (Path(self.config.exomol_dir).expanduser()
+                               if self.config.exomol_dir else self.cache / "exomol")
+                path = _exomol_path(species, exomol_root, self.config.exomol_datasets)
+                definition = path / f"{path.parent.name}__{path.name}.def"
+                if not definition.exists():
+                    from tqdm.auto import tqdm
+                    tqdm.write(
+                        f"Downloading ExoMol line data for {species} -> {path}",
+                        file=sys.__stderr__ or sys.stderr,
+                    )
+                path.parent.mkdir(parents=True, exist_ok=True)
+                mdb = MdbExomol(
+                    str(path), nurange=[nu_min, nu_max],
+                    crit=self.config.line_strength_crit,
+                    Ttyp=self.system.equilibrium_temperature_k,
+                    broadf=False, gpu_transfer=False, inherit_dataframe=False,
+                    engine="vaex",
                 )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            mdb = MdbHitran(path, nurange=[nu_min, nu_max], isotope=self.config.hitran_isotope,
-                            gpu_transfer=False, inherit_dataframe=False,
-                            crit=self.config.line_strength_crit,
-                            Ttyp=self.system.equilibrium_temperature_k, engine="vaex")
-            opa = OpaPremodit(mdb, nu, diffmode=0,
-                              broadening_resolution={"mode": "manual", "value": 0.2},
-                              auto_trange=(max(100.0, 0.7 * self.system.equilibrium_temperature_k),
-                                           1.3 * self.system.equilibrium_temperature_k),
-                              allow_32bit=True, wavelength_order="ascending")
-            xs = opa.xsmatrix(temperature, art.pressure)
-            molmass = float(mdb.molmass)
-            source = f"HITRAN {species} via ExoJAX"
-            line_count = int(np.asarray(mdb.nu_lines).size)
+                molmass = float(mdb.molmass)
+                source = f"ExoMol {path.parent.name}/{path.name} via ExoJAX"
+                line_count = int(np.asarray(mdb.nu_lines).size)
+            else:
+                from exojax.database.hitran.api import MdbHitran
+                from exojax.database.multimol import database_path_hitran12
+                hitran_root = (Path(self.config.hitran_dir).expanduser()
+                               if self.config.hitran_dir else self.cache / "hitran")
+                path = hitran_root / database_path_hitran12(species)
+                cached_tables = tuple(path.parent.glob("*.hdf5")) if path.parent.exists() else ()
+                if not path.exists() and not cached_tables:
+                    from tqdm.auto import tqdm
+                    tqdm.write(
+                        f"Downloading HITRAN line data for {species} via ExoJAX -> {path}",
+                        file=sys.__stderr__ or sys.stderr,
+                    )
+                path.parent.mkdir(parents=True, exist_ok=True)
+                mdb = MdbHitran(
+                    path, nurange=[nu_min, nu_max], isotope=self.config.hitran_isotope,
+                    gpu_transfer=False, inherit_dataframe=False,
+                    crit=self.config.line_strength_crit,
+                    Ttyp=self.system.equilibrium_temperature_k, engine="vaex",
+                )
+                molmass = float(mdb.molmass)
+                source = f"HITRAN {species} via ExoJAX"
+                line_count = int(np.asarray(mdb.nu_lines).size)
+            if line_count:
+                opa = OpaPremodit(
+                    mdb, nu, diffmode=0,
+                    broadening_resolution={"mode": "manual", "value": 0.2},
+                    auto_trange=(
+                        max(100.0, 0.7 * self.system.equilibrium_temperature_k),
+                        1.3 * self.system.equilibrium_temperature_k,
+                    ),
+                    allow_32bit=True, wavelength_order="ascending",
+                )
+                xs = opa.xsmatrix(temperature, art.pressure)
+            else:
+                xs = None
         if xs is None:
             molecular_dtau = jnp.zeros((self.config.n_layers, len(nu)))
         else:
@@ -683,6 +766,7 @@ class TemplateFactory:
         depth = cont + sampled_delta
         contrast = -sampled_delta
         meta = {"backend": "exojax", "source": source, "line_count": line_count,
+                "opacity_database": ("kurucz" if _is_atomic(species) else database),
                 "opa_resolution": float(opa_resolution), "chemistry": chemistry,
                 "instrument_mode": self.instmode,
                 "resolving_power": float(self.config.resolving_power),

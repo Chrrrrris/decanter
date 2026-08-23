@@ -96,13 +96,23 @@ written by the upstream reduction. The transmission product is continuous;
 without repeating the reduction. Older Decanter products without this file can
 still run, but no telluric pixels are masked.
 
-The production atmosphere backend is ExoJAX. It obtains molecular lines through
-the ExoJAX HITRAN interface, atomic lines from Kurucz, and equilibrium abundances
-from FastChem. The raw-data directory does not need any of these databases.
-First use may download them into `atmosphere.cache_dir`. The optional
-`atmosphere.hitran_dir`, `atmosphere.cia_dir`, and `atmosphere.kurucz_dir`
-fields point to existing shared line-list and collision-induced-absorption
-caches.
+The production atmosphere backend is ExoJAX. Molecular opacity uses HITRAN
+when the species is supported there and otherwise resolves an ExoMol line
+list. FeH and CrH default to the same MoLLIST isotopologues used by the
+WASP-193b notebook. Atomic species use Kurucz, and FastChem supplies
+equilibrium abundances. The raw-data directory does not need any of these
+databases. First use announces downloads into `atmosphere.cache_dir`. The
+optional `atmosphere.hitran_dir`, `atmosphere.exomol_dir`,
+`atmosphere.cia_dir`, and `atmosphere.kurucz_dir` fields point to existing
+shared caches. Database selection and ExoMol datasets can be overridden:
+
+```toml
+[atmosphere]
+species = ["H2O", "CrH", "FeH", "TiO"]
+opacity_databases = { H2O = "hitran", TiO = "exomol" }
+exomol_datasets = { CrH = "52Cr-1H/MoLLIST", FeH = "56Fe-1H/MoLLIST" }
+# exomol_dir = "/optional/shared/exomol/cache"
+```
 
 For each species, the pipeline constructs one wide atmospheric model spanning
 all retained orders, convolves it with the mode-specific Gaussian instrument

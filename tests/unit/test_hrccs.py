@@ -27,7 +27,9 @@ from decanter.hrccs.models import (
     Template,
     TemplateFactory,
     _cia_supported_indices,
+    _exomol_path,
     _is_atomic,
+    _molecular_database,
     _sample_instrument,
     _wide_wavelength_grid,
 )
@@ -253,6 +255,23 @@ def test_atomic_classifier_does_not_misclassify_diatomic_molecules():
     assert not _is_atomic("H2O")
 
 
+def test_molecular_database_auto_routes_hitran_and_exomol():
+    assert _molecular_database("H2O", {}) == "hitran"
+    assert _molecular_database("CO", {}) == "hitran"
+    assert _molecular_database("FeH", {}) == "exomol"
+    assert _molecular_database("CrH", {}) == "exomol"
+    assert _molecular_database("H2O", {"H2O": "exomol"}) == "exomol"
+
+
+def test_exomol_dataset_defaults_and_overrides(tmp_path):
+    assert _exomol_path("CrH", tmp_path, {}) == (
+        tmp_path / "CrH" / "52Cr-1H" / "MoLLIST"
+    )
+    assert _exomol_path("TiO", tmp_path, {"TiO": "46Ti-16O/Toto"}) == (
+        tmp_path / "TiO" / "46Ti-16O" / "Toto"
+    )
+
+
 def test_wide_atomic_template_accepts_empty_internal_chunks(tmp_path):
     atmosphere = AtmosphereConfig(
         backend="analytic", cache_dir=str(tmp_path), resolving_power=28_000.0,
@@ -288,7 +307,7 @@ def test_wide_atomic_template_rejects_species_absent_from_full_band(tmp_path):
         {"backend": "exojax", "line_count": 0,
          "continuum": {"cia_grid_coverage": {}}},
     )
-    with pytest.raises(ValueError, match="no Mg lines across the full"):
+    with pytest.raises(ValueError, match="contains no Mg lines across"):
         factory._stitch_wide("Mg", wave, [piece], 8)
 
 
