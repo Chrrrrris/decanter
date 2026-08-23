@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 
 from decanter.hrccs.analysis import run_species
-from decanter.hrccs.detrend import prepare_cube
 from decanter.hrccs.io import load_decanter
 from decanter.hrccs.models import TemplateFactory
 from decanter.hrccs.orbit import build_orbit
@@ -69,7 +68,7 @@ def _save_result(result, output, orbit, rv_grid, kp_grid, vsys_grid):
         injected_snr_map=result.injected.snr_map,
         null_mean_snr_map=result.null_mean_map,
         null_snr_at_expected=result.null_snr_at_expected,
-        null_local_peak_snr=result.null_local_peak_snr,
+        null_global_peak_snr=result.null_global_peak_snr,
         telluric_keep_mask=result.mask,
     )
 
@@ -94,10 +93,7 @@ def run(config):
     flux = cube.flux[:, retained]
     orders = cube.orders[retained]
     mask = mask[retained]
-    prepared = (np.asarray(flux, dtype=float).copy()
-                if config.reduction.analysis_mode == "notebook"
-                else prepare_cube(flux, config.reduction.continuum_percentile,
-                                  config.reduction.continuum_window_pixels))
+    prepared = np.asarray(flux, dtype=float).copy()
     atmosphere = replace(config.atmosphere, resolving_power=resolving_power)
     factory = TemplateFactory(config.system, atmosphere, instmode=cube.instmode)
     from tqdm.auto import tqdm
@@ -119,13 +115,9 @@ def run(config):
                 raise RuntimeError("cached template has the wrong instrumental resolution")
             if not np.array_equal(template.wavelength_um, wave):
                 raise RuntimeError("template is not sampled on its order wavelength grid")
-        contrast = np.asarray([template.contrast for template in templates])
         depths = np.asarray([template.transit_depth for template in templates])
-        raw_template = (-depths if config.reduction.template_signal == "absolute_depth"
-                        else contrast)
-        wide_signal = (-wide_template.transit_depth
-                       if config.reduction.template_signal == "absolute_depth"
-                       else wide_template.contrast)
+        raw_template = -depths
+        wide_signal = -wide_template.transit_depth
         result = run_species(
             species, prepared, wavelength, raw_template, mask, orbit.phase, orbit.berv_kms,
             orbit.transit_weight, rv_grid, kp_grid, vsys_grid,
@@ -135,8 +127,6 @@ def run(config):
             config.search.local_vsys_half_width_kms,
             config.injection.scale, config.injection.random_seed + species_index * 100_000,
             config.injection.null_realizations,
-            analysis_mode=config.reduction.analysis_mode,
-            order_combination=config.reduction.order_combination,
             wide_wavelength_um=wide_template.wavelength_um,
             wide_template=wide_signal,
             show_progress=config.show_progress,
@@ -160,7 +150,7 @@ def run(config):
         "configuration": asdict(config), "orders": orders.tolist(),
         "instrument_mode": cube.instmode,
         "template_resolving_power": resolving_power,
-        "analysis_mode": config.reduction.analysis_mode,
+        "analysis_method": "notebook_exact_svd_refit",
         "berv_kms": [float(np.nanmin(orbit.berv_kms)), float(np.nanmax(orbit.berv_kms))],
         "stellar_rv_kms": orbit.stellar_rv_kms,
         "component_selection": {
@@ -168,6 +158,7 @@ def run(config):
             "kp_half_width_kms": config.search.local_kp_half_width_kms,
             "vsys_half_width_kms": config.search.local_vsys_half_width_kms,
             "injection_and_null_rank": "fixed to the observed-data-selected rank",
+            "false_alarm_threshold": "global maximum over each null Kp-Vsys map",
         },
         "results": [{"species": item.species,
                      "selected_svd_components": item.selected.count,
@@ -180,6 +171,7 @@ def run(config):
                      "observed_peak_vsys_kms": item.selected.peak_vsys_kms,
                      "injected_expected_snr": item.injected.expected_snr,
                      "injected_local_peak_snr": item.injected.local_peak_snr,
+                     "null_global_peak_snr": item.null_global_peak_snr.tolist(),
                      "null_false_alarm_fraction": item.null_false_alarm_fraction}
                     for item in results],
     }

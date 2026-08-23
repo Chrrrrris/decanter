@@ -22,17 +22,14 @@ metallicity_dex = -0.108
 
 [atmosphere]
 # Start with H2O; add supported HITRAN molecules or Kurucz atomic species.
-species = ["H2O"]
+species = ["H2O", "CrH", "FeH"]
 cloud_top_pressure_bar = 0.03
 cache_dir = "~/.cache/decanter/hrccs"
 
 [reduction]
-analysis_mode = "notebook"
 telluric_threshold = 0.90
 telluric_mask_scope = "in_transit"
 ccf_lsf_margin_widths = 3.0
-template_signal = "absolute_depth"
-order_combination = "equal"
 svd_components = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
 [search]

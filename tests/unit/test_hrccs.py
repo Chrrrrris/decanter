@@ -9,6 +9,7 @@ import pytest
 from decanter.hrccs.analysis import (
     ComponentResult,
     _filtered_cube,
+    _global_null_fap,
     _map_summary,
     _select_component,
     combine_order_ccfs,
@@ -77,6 +78,19 @@ def test_map_summary_separates_expected_local_and_global_maxima():
     assert summary == (2.0, 4.0, 110.0, 5.0, 9.0, 190.0, -45.0)
 
 
+def test_fap_uses_global_null_maxima_as_thresholds():
+    # Two full-map maxima exceed the observed 4-sigma local peak. The +1
+    # finite-sample correction therefore gives 3/5.
+    null_global = np.asarray([3.0, 4.2, 5.1, 2.8])
+    assert _global_null_fap(4.0, null_global) == pytest.approx(3.0 / 5.0)
+
+
+def test_fap_ignores_nonfinite_null_maxima():
+    assert _global_null_fap(4.0, [5.0, np.nan, 2.0]) == pytest.approx(2.0 / 3.0)
+    assert np.isnan(_global_null_fap(np.nan, [5.0]))
+    assert np.isnan(_global_null_fap(4.0, [np.nan]))
+
+
 def test_default_search_grids_and_local_window():
     config = HRCCSConfig(
         input=InputConfig("products"),
@@ -96,9 +110,6 @@ def test_default_search_grids_and_local_window():
     assert config.search.local_vsys_half_width_kms == 15.0
     assert InjectionConfig().null_realizations == 5
     assert config.show_progress is True
-    assert config.reduction.analysis_mode == "notebook"
-    assert config.reduction.template_signal == "absolute_depth"
-    assert config.reduction.order_combination == "equal"
 
 
 def test_search_grid_steps_must_be_positive():
@@ -127,9 +138,8 @@ def test_notebook_reduction_configuration_is_valid():
             transit_duration_hours=2.0, expected_kp_kms=200.0,
         ),
         reduction=ReductionConfig(
-            analysis_mode="notebook", telluric_mask_scope="in_transit",
-            edge_trim_pixels=0, ccf_lsf_margin_widths=3.0,
-            template_signal="absolute_depth", order_combination="equal",
+            telluric_mask_scope="in_transit", edge_trim_pixels=0,
+            ccf_lsf_margin_widths=3.0,
         ),
     )
     config.validate()
@@ -151,16 +161,16 @@ def test_notebook_svd_is_linear_uncentered_svd():
 def test_notebook_template_filter_is_exact_injected_svd_refit():
     rng = np.random.default_rng(7)
     matrix = 1000.0 + rng.normal(size=(10, 23))
-    path = svd_path(matrix, (2,), np.ones(matrix.shape[1], bool), mode="notebook")
+    path = svd_path(matrix, (2,), np.ones(matrix.shape[1], bool))
     model = np.zeros((10, 1, 23))
     model[3:7, 0, 8:15] = -2.0e-3
-    actual = _filtered_cube(model, (path,), 2, "notebook")[:, 0]
+    actual = _filtered_cube(model, (path,), 2)[:, 0]
 
     scaling = path.lower[2]
     injected_path = svd_path(
-        scaling * (1.0 + model[:, 0]), (2,), np.ones(23, bool), mode="notebook"
+        scaling * (1.0 + model[:, 0]), (2,), np.ones(23, bool)
     )
-    control_path = svd_path(scaling, (2,), np.ones(23, bool), mode="notebook")
+    control_path = svd_path(scaling, (2,), np.ones(23, bool))
     expected = injected_path.residuals[2] - control_path.residuals[2]
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
 
@@ -168,7 +178,7 @@ def test_notebook_template_filter_is_exact_injected_svd_refit():
 def test_equal_order_combination_matches_notebook_sum():
     order_ccf = np.array([[[1.0, 2.0]], [[3.0, np.nan]], [[-1.0, 4.0]]])
     # Equal per-order summation is the notebook convention and canonical default.
-    actual = combine_order_ccfs(order_ccf, np.ones(3))
+    actual = combine_order_ccfs(order_ccf)
     np.testing.assert_allclose(actual, [[3.0, 6.0]])
 
 

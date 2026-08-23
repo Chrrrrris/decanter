@@ -111,19 +111,13 @@ class AtmosphereConfig:
 
 @dataclass(frozen=True)
 class ReductionConfig:
-    # ``notebook`` reproduces the minimal-processing WASP-69b reference:
-    # linear-flux SVD, exact injected-template SVD refit, and equal-order CCF
-    # summation. ``projected_log`` retains the original packaged prototype.
-    analysis_mode: str = "notebook"
-    continuum_percentile: float = 95.0
-    continuum_window_pixels: int = 151
+    # The reduction reproduces the minimal-processing WASP-69b reference:
+    # linear-flux SVD and exact injected-template SVD refitting.
     telluric_threshold: float = 0.90
     telluric_mask_scope: str = "in_transit"
     edge_trim_pixels: int = 0
     ccf_lsf_margin_widths: float = 3.0
     min_valid_pixels: int = 100
-    template_signal: str = "absolute_depth"
-    order_combination: str = "equal"
     svd_components: tuple[int, ...] = tuple(range(1, 13))
 
 
@@ -205,16 +199,8 @@ class HRCCSConfig:
             raise ValueError("svd_components must be unique non-negative integers")
         if not 0.0 < self.reduction.telluric_threshold <= 1.0:
             raise ValueError("telluric_threshold must be in (0, 1]")
-        if self.reduction.analysis_mode not in {"projected_log", "notebook"}:
-            raise ValueError("reduction analysis_mode must be 'projected_log' or 'notebook'")
         if self.reduction.telluric_mask_scope not in {"all", "in_transit"}:
             raise ValueError("telluric_mask_scope must be 'all' or 'in_transit'")
-        if self.reduction.template_signal not in {"differential", "absolute_depth"}:
-            raise ValueError(
-                "reduction template_signal must be 'differential' or 'absolute_depth'"
-            )
-        if self.reduction.order_combination not in {"information", "equal"}:
-            raise ValueError("order_combination must be 'information' or 'equal'")
         if self.reduction.edge_trim_pixels < 0:
             raise ValueError("edge_trim_pixels must be non-negative")
         if self.reduction.ccf_lsf_margin_widths < 0:

@@ -26,13 +26,10 @@ pressure_bottom_bar = 100.0
 cache_dir = "~/.cache/decanter/hrccs"
 
 [reduction]
-analysis_mode = "notebook"
 telluric_threshold = 0.50
 telluric_mask_scope = "in_transit"
 edge_trim_pixels = 0
 ccf_lsf_margin_widths = 3.0
-template_signal = "absolute_depth"
-order_combination = "equal"
 svd_components = [10]
 
 [search]

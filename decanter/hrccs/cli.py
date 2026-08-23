@@ -22,7 +22,7 @@ def main() -> None:
               f"at ({result.selected.local_peak_kp_kms:.1f}, "
               f"{result.selected.local_peak_vsys_kms:.1f}) km/s, "
               f"injected local max={result.injected.local_peak_snr:+.2f} sigma, "
-              f"null FAP={result.null_false_alarm_fraction:.3f}")
+              f"global-null FAP={result.null_false_alarm_fraction:.3f}")
 
 
 if __name__ == "__main__":

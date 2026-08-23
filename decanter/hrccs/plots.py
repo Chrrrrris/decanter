@@ -141,6 +141,6 @@ def final_four_panel(result, orbit, rv_grid, kp_grid, vsys_grid, expected_kp,
     fig.suptitle(
         f"{result.species} | observed local max={result.selected.local_peak_snr:+.2f}$\sigma$ | "
         f"injected local max={result.injected.local_peak_snr:+.2f}$\sigma$ | "
-        f"null FAP={result.null_false_alarm_fraction:.3f}"
+        f"global-null FAP={result.null_false_alarm_fraction:.3f}"
     )
     _save(fig, Path(output) / f"{result.species}_final_kp_vsys", formats, dpi)
