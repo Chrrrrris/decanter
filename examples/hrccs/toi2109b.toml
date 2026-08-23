@@ -20,7 +20,7 @@ equilibrium_temperature_k = 3646.0
 metallicity_dex = 0.068
 
 [atmosphere]
-species = ["H2O", "OH", "Fe"]
+species = ["H2O", "Si", "Fe", "Mg", "Ca", "V"]
 cloud_top_pressure_bar = 0.03
 cache_dir = "~/.cache/decanter/hrccs"
 
