@@ -26,6 +26,7 @@ from decanter.wavecal.config import AUTO_MODE, MODES
 
 def _pairs(frames: Path, listfile: Path) -> list[tuple[Path, Path]]:
     pairs: list[tuple[Path, Path]] = []
+    object_lines: dict[Path, list[int]] = {}
     for number, line in enumerate(listfile.read_text().splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -42,8 +43,21 @@ def _pairs(frames: Path, listfile: Path) -> list[tuple[Path, Path]]:
                 raise FileNotFoundError(f"missing frame listed at line {number}: {path}")
             paths.append(path)
         pairs.append((paths[0], paths[1]))
+        object_lines.setdefault(paths[0].resolve(), []).append(number)
     if not pairs:
         raise ValueError(f"no object/sky pairs found in {listfile}")
+    duplicates = {
+        path: lines for path, lines in object_lines.items() if len(lines) > 1
+    }
+    if duplicates:
+        detail = "; ".join(
+            f"{path.name} on lines {', '.join(map(str, lines))}"
+            for path, lines in sorted(duplicates.items(), key=lambda item: item[1][0])
+        )
+        raise ValueError(
+            f"{listfile}: each science frame must appear once; duplicate object "
+            f"frames would be double-weighted in the time series: {detail}"
+        )
     return pairs
 
 
