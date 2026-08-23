@@ -185,3 +185,18 @@ def test_builds_series_directly_from_warp_aligned_reductions() -> None:
     assert series.sky is not None
     assert series.wave[0, 0] >= early.obj[(1.30, 159)].wavelength[0]
     assert series.wave[-1, 0] <= late.obj[(1.30, 159)].wavelength[-1]
+
+
+def test_in_memory_series_disambiguates_repeated_object_with_sky_frame() -> None:
+    first = _memory_reduction("WINA00000001", "01:00:00", 0.0)
+    second = _memory_reduction("WINA00000001", "01:00:00", 0.0)
+    first.meta["SKYFRAME"] = "WINA00000002"
+    second.meta["SKYFRAME"] = "WINA00000003"
+
+    series = from_reductions([first, second])
+
+    assert series.frame_ids == (
+        "WINA00000001__WINA00000002",
+        "WINA00000001__WINA00000003",
+    )
+    assert series.n_frames == 2

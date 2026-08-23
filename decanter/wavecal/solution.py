@@ -212,6 +212,7 @@ class WavecalSolution:
             )
 
         meta = dict(reduction.meta)
+        meta["SERIESID"] = frame_id
         meta["WAVECAL"] = self.mode
         meta["WAVECZP"] = self.zero_point
         meta["WAVECASM"] = self.assembly

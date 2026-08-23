@@ -497,7 +497,9 @@ class TransitSeries:
     ) -> None:
         """Write the fully calibrated time series and its provenance.
 
-        Each exposure is written to ``workdir/<OBJFRAME>/``.  This method is
+        Each exposure is written to ``workdir/<SERIESID>/`` (normally the
+        object-frame name; object/sky pair names disambiguate repeated object
+        frames). This method is
         intentionally attached to the completed :class:`TransitSeries`, not
         to an intermediate reduction step: when a physical wavecal solution
         is present, the FITS WCS therefore contains the telluric/OH correction
@@ -510,17 +512,9 @@ class TransitSeries:
         root = Path(workdir)
         root.mkdir(parents=True, exist_ok=True)
 
-        frame_ids: list[str] = []
-        for index, reduction in enumerate(self.reductions):
-            frame_id = str(reduction.meta.get("OBJFRAME", "")).strip()
-            if not frame_id and reduction.obj_path is not None:
-                frame_id = reduction.obj_path.stem
-            if not frame_id:
-                frame_id = f"frame_{index:04d}"
-            frame_ids.append(frame_id)
+        from decanter.wavecal.series import frame_ids_from_reductions
 
-        if len(set(frame_ids)) != len(frame_ids):
-            raise ValueError("cannot write TransitSeries with duplicate frame ids")
+        frame_ids = frame_ids_from_reductions(self.reductions)
 
         for frame_id, reduction in zip(frame_ids, self.reductions, strict=True):
             reduction.write_to(
@@ -581,7 +575,13 @@ def calibrate_wavelengths(
 
         label = series.reductions[0].obj_name if series.reductions else "dataset"
         wavecal_report_pdf(run, diagnostic_pdf, dataset=label)
-    corrected = solution.apply_many(series.reductions)
+    from decanter.wavecal.series import frame_ids_from_reductions
+
+    frame_ids = frame_ids_from_reductions(series.reductions)
+    corrected = [
+        solution.apply(reduction, frame_id=frame_id)
+        for reduction, frame_id in zip(series.reductions, frame_ids, strict=True)
+    ]
     return TransitSeries(
         reductions=corrected,
         shifts=series.shifts,

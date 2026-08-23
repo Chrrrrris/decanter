@@ -45,7 +45,9 @@ def apply_solution_to_directory(
             header = hdul[0].header.copy()
             data = np.asarray(hdul[0].data).copy()
 
-        frame_id = str(header.get("OBJFRAME", source_path.parent.name)).strip()
+        frame_id = str(header.get(
+            "SERIESID", header.get("OBJFRAME", source_path.parent.name)
+        )).strip()
         order = int(header["ECHORDER"])
         row = solution.frame_index(frame_id)
         column = solution.order_index(order)

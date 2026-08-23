@@ -78,6 +78,43 @@ def test_physical_wavecal_is_applied_after_and_preserves_warp_shifts(monkeypatch
     assert corrected.reductions[0].meta["WAVECAL"] == "hybrid_refit"
 
 
+def test_physical_wavecal_preserves_repeated_object_sky_pairs(monkeypatch, tmp_path) -> None:
+    first = _reduction("WINA00000001", 1)
+    second = _reduction("WINA00000001", 1)
+    first.meta["SKYFRAME"] = "WINA00000002"
+    second.meta["SKYFRAME"] = "WINA00000003"
+    warp_series = TransitSeries(
+        reductions=[first, second], shifts=np.zeros(2), refid=0,
+    )
+    solve_module = importlib.import_module("decanter.wavecal.solve")
+
+    def fake_solve(reference, config, *, verbose, diagnostic_pdf):
+        velocity = np.repeat(np.array([[1.0], [2.0]]), reference.n_orders, axis=1)
+        return decanter.WavecalSolution(
+            frame_ids=reference.frame_ids,
+            orders=reference.orders,
+            velocity=velocity,
+            source=np.full(velocity.shape, "telluric", dtype="U16"),
+            bracketed=np.ones(velocity.shape, dtype=bool),
+            mode=config.mode,
+        )
+
+    monkeypatch.setattr(solve_module, "solve", fake_solve)
+    corrected = decanter.calibrate_wavelengths(
+        warp_series, decanter.WavecalConfig(), verbose=False,
+    )
+
+    expected_ids = (
+        "WINA00000001__WINA00000002",
+        "WINA00000001__WINA00000003",
+    )
+    assert tuple(r.meta["SERIESID"] for r in corrected.reductions) == expected_ids
+    assert corrected.reductions[0].meta["OBJFRAME"] == "WINA00000001"
+    assert corrected.reductions[1].meta["OBJFRAME"] == "WINA00000001"
+    corrected.write_to(tmp_path)
+    assert all((tmp_path / frame_id).is_dir() for frame_id in expected_ids)
+
+
 def test_warp_only_series_remains_the_default() -> None:
     series = TransitSeries(
         reductions=[_reduction("WINA00000001", 1)],

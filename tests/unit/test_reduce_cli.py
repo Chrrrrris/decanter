@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import decanter
-import pytest
 
 
 def _load_cli():
@@ -54,16 +53,3 @@ def test_cli_runs_wavecal_and_optional_report_by_default(monkeypatch, tmp_path) 
     assert captured["workdir"] == output
     assert captured["wavecal_config"].mode == "hybrid_refit"
     assert captured["wavecal_diagnostic_pdf"] == output / "wavecal_diagnostics.pdf"
-
-
-def test_pairs_rejects_duplicate_science_frames_before_reduction(tmp_path) -> None:
-    cli = _load_cli()
-    frames = tmp_path / "raw"
-    frames.mkdir()
-    for name in ("OBJ.fits", "SKY1.fits", "SKY2.fits"):
-        (frames / name).touch()
-    listfile = tmp_path / "pairs.txt"
-    listfile.write_text("OBJ SKY1\nOBJ SKY2\n")
-
-    with pytest.raises(ValueError, match=r"OBJ\.fits on lines 1, 2"):
-        cli._pairs(frames, listfile)

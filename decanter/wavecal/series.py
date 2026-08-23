@@ -39,7 +39,8 @@ class Series:
     """Every frame of one dataset on a common per-order reference grid.
 
     Attributes:
-        frame_ids: object-frame identifiers, sorted by mid-exposure time.
+        frame_ids: unique object/sky-pair identifiers, sorted by mid-exposure
+            time. For ordinary one-sky-per-object lists these equal OBJFRAME.
         orders: echelle orders present in every frame.
         wave: ``(n_pixels, n_orders)`` reference wavelengths in angstroms.
         dv_pix_kms: ``(n_orders,)`` velocity per reference pixel.
@@ -151,6 +152,46 @@ def _index_frame(frame_dir: Path) -> dict[str, dict[tuple[float, int], Path]]:
     return index
 
 
+def frame_ids_from_reductions(reductions: list[Reduction]) -> tuple[str, ...]:
+    """Return stable IDs for reduction *pairs* without changing OBJFRAME.
+
+    Original Decanter permits one object exposure to be reduced against more
+    than one sky exposure.  Physical wavecal needs a unique row per resulting
+    pair, so duplicate object names are disambiguated with SKYFRAME while the
+    original object and sky metadata remain untouched.
+    """
+    rows = []
+    for index, reduction in enumerate(reductions):
+        meta = reduction.meta
+        explicit = str(meta.get("SERIESID", "")).strip()
+        fallback = (reduction.obj_path.stem if reduction.obj_path is not None
+                    else f"frame_{index:04d}")
+        obj = str(meta.get("OBJFRAME", fallback)).strip() or fallback
+        sky = str(meta.get("SKYFRAME", "")).strip()
+        rows.append((explicit, obj, sky))
+
+    base_counts: dict[str, int] = {}
+    for explicit, obj, _ in rows:
+        base = explicit or obj
+        base_counts[base] = base_counts.get(base, 0) + 1
+
+    used: dict[str, int] = {}
+    result = []
+    for explicit, obj, sky in rows:
+        base = explicit or obj
+        candidate = base
+        if not explicit and base_counts[base] > 1:
+            candidate = f"{obj}__{sky}" if sky else f"{obj}__pair"
+        occurrence = used.get(candidate, 0) + 1
+        used[candidate] = occurrence
+        if occurrence > 1:
+            candidate = f"{candidate}__{occurrence:02d}"
+        result.append(candidate)
+    if len(set(result)) != len(result):
+        raise ValueError("could not construct unique time-series frame identifiers")
+    return tuple(result)
+
+
 def from_reductions(
     reductions: list[Reduction],
     *,
@@ -186,13 +227,16 @@ def from_reductions(
         raise ValueError("no echelle order is present in every reduction")
 
     records: list[dict[str, Any]] = []
-    for index, reduction in enumerate(reductions):
+    series_ids = frame_ids_from_reductions(reductions)
+    for index, (reduction, series_id) in enumerate(zip(reductions, series_ids, strict=True)):
         meta = dict(reduction.meta)
         fallback = reduction.obj_path.stem if reduction.obj_path is not None else f"frame_{index:04d}"
+        obj_frame = str(meta.get("OBJFRAME", fallback))
         records.append(
             {
                 "reduction": reduction,
-                "frame_id": str(meta.get("OBJFRAME", fallback)),
+                "frame_id": series_id,
+                "obj_frame": obj_frame,
                 "time_jd": _mid_time_jd(meta),
                 "sky_frame": meta.get("SKYFRAME"),
                 "airmass": float(meta.get("AIRMASS", np.nan)),
@@ -202,9 +246,7 @@ def from_reductions(
         )
     records.sort(key=lambda row: np.inf if np.isnan(row["time_jd"]) else row["time_jd"])
     frame_ids = [row["frame_id"] for row in records]
-    if len(set(frame_ids)) != len(frame_ids):
-        raise ValueError("OBJFRAME identifiers must be unique for wavelength calibration")
-    time_by_id = {row["frame_id"]: row["time_jd"] for row in records}
+    time_by_id = {row["obj_frame"]: row["time_jd"] for row in records}
 
     low = np.full(len(order_list), -np.inf)
     high = np.full(len(order_list), np.inf)
@@ -331,12 +373,14 @@ def load_series(
     native = np.full(len(order_list), np.inf)
     for frame_dir, index in indexed:
         header = fits.getheader(index["obj"][(cut, order_list[0])])
-        frame_id = str(header.get("OBJFRAME", frame_dir.name))
+        obj_frame = str(header.get("OBJFRAME", frame_dir.name))
+        frame_id = str(header.get("SERIESID", obj_frame))
         records.append(
             {
                 "dir": frame_dir,
                 "index": index,
                 "frame_id": frame_id,
+                "obj_frame": obj_frame,
                 "time_jd": _mid_time_jd(header),
                 "sky_frame": header.get("SKYFRAME"),
                 "airmass": float(header.get("AIRMASS", np.nan)),
@@ -353,7 +397,7 @@ def load_series(
             native[j] = min(native[j], size)
 
     records.sort(key=lambda row: (np.inf if np.isnan(row["time_jd"]) else row["time_jd"]))
-    time_by_id = {row["frame_id"]: row["time_jd"] for row in records}
+    time_by_id = {row["obj_frame"]: row["time_jd"] for row in records}
 
     size = int(n_pixels) if n_pixels else int(np.max(native))
     # Inset by a hair. The endpoints are exactly a native sample of the
