@@ -75,21 +75,10 @@ series.shifts                    # WARP relative shifts, Angstrom
 series.wavecal_solution.velocity # residual physical shifts, km/s/order
 ```
 
-To calibrate an existing Decanter reduction directory without repeating the
-extraction, use the command-line layer. The report flag is optional and may be
-given with no filename, in which case it writes `wavecal_diagnostics.pdf`
-inside the output directory.
-
-```bash
-python scripts/run_wavecal.py \
-  /data/decanter_reductions/wasp69b \
-  /data/decanter_wavecal/wasp69b \
-  --diagnostic-pdf
-```
-
-All four concrete modes remain selectable with `--mode`: `oh_static`,
-`oh_refit`, `hybrid_static`, and `hybrid_refit`. See
-`examples/run_wavecal_three_datasets.sh` for a complete three-dataset loop.
+All four concrete modes remain selectable from the integrated `reduce.py`
+command with `--wavecal`: `oh_static`, `oh_refit`, `hybrid_static`, and
+`hybrid_refit`. The default `--wavecal auto` selects `hybrid_refit` for
+HIRES-Y/J and `hybrid_static` for WIDE.
 
 ## Downstream HRCCS
 
@@ -244,13 +233,10 @@ cube, fixed-interior Pearson CCFs, and equal-order summation. The
 `absolute_depth` template includes wavelength-dependent continuum opacity; the
 SVD removes its constant component.
 
-The WASP-69b notebook-matching validation profile and independent numerical
-cross-check are also included:
+The WASP-69b notebook-matching validation profile is also included:
 
 ```bash
 decanter-hrccs examples/hrccs/wasp69b_matched_validation.toml
-python scripts/compare_hrccs_notebook_reference.py \
-    examples/hrccs/wasp69b_matched_validation.toml
 ```
 
 The earlier projected-log implementation remains available only as an explicit

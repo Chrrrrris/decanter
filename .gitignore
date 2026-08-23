@@ -67,5 +67,9 @@ docs/_build/
 /output/
 /tmp/
 
+# Local standalone analysis utilities and generated HRCCS products
+/scripts/
+/hrccs_output/
+
 # bundled per-mode aperture reference templates (small, needed at runtime)
 !decanter/calib/reference_data/*.npz
