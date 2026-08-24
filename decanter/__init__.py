@@ -33,6 +33,12 @@ from decanter._reduction import Intermediates, OrderSpectrum, Reduction
 from decanter.api import TransitSeries, calibrate_wavelengths, combine, reduce, reduce_many
 from decanter.calib import Calibration, CalibrationMismatch, InstrumentConfig
 from decanter.config import Config
+from decanter.serval import (
+    RVStabilityResult,
+    TransitEphemeris,
+    run_serval_rv_stability,
+    run_serval_rv_stability_directory,
+)
 from decanter.wavecal import WavecalConfig, WavecalSolution
 
 __all__ = [
@@ -43,6 +49,8 @@ __all__ = [
     "Intermediates",
     "OrderSpectrum",
     "Reduction",
+    "RVStabilityResult",
+    "TransitEphemeris",
     "TransitSeries",
     "WavecalConfig",
     "WavecalSolution",
@@ -50,4 +58,6 @@ __all__ = [
     "combine",
     "reduce",
     "reduce_many",
+    "run_serval_rv_stability",
+    "run_serval_rv_stability_directory",
 ]

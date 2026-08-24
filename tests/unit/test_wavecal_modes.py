@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from decanter.wavecal.config import WavecalConfig
-from decanter.wavecal.solve import solve
+from decanter.wavecal.solve import _to_object_epoch, solve
 
 
 class _RichModel(SimpleNamespace):
@@ -158,3 +158,43 @@ def test_automatic_mode_defaults_follow_instrument_band() -> None:
 def test_automatic_mode_requires_a_known_instrument_band() -> None:
     with pytest.raises(ValueError, match="cannot choose an automatic"):
         WavecalConfig().resolved_for("UNKNOWN")
+
+
+def test_oh_object_epoch_uses_paired_sky_warp_shift() -> None:
+    series = SimpleNamespace(
+        n_frames=2,
+        frame_ids=("object-a", "sky-a"),
+        dv_pix_kms=np.asarray([0.8, 1.2]),
+        time_jd=np.asarray([1.0, 2.0]),
+        sky_time_jd=np.asarray([2.0, 1.0]),
+        meta=[
+            {"OBJFRAME": "object-a", "SKYFRAME": "sky-a", "WAVSHIFT": 0.5},
+            {"OBJFRAME": "sky-a", "SKYFRAME": "object-a", "WAVSHIFT": -0.25},
+        ],
+    )
+    raw = np.asarray([[10.0, 20.0], [30.0, 40.0]])
+
+    corrected = _to_object_epoch(raw, series, np.asarray([100.0, -100.0]))
+
+    np.testing.assert_allclose(
+        corrected,
+        np.asarray([
+            [10.2, 20.3],
+            [29.6, 39.4],
+        ]),
+    )
+
+
+def test_oh_object_epoch_falls_back_without_warp_provenance() -> None:
+    series = SimpleNamespace(
+        n_frames=2,
+        frame_ids=("one", "two"),
+        dv_pix_kms=np.asarray([1.0]),
+        time_jd=np.asarray([1.0, 2.0]),
+        sky_time_jd=np.asarray([2.0, 1.0]),
+    )
+    raw = np.asarray([[10.0], [20.0]])
+
+    corrected = _to_object_epoch(raw, series, np.asarray([1.0, 3.0]))
+
+    np.testing.assert_allclose(corrected, np.asarray([[8.0], [22.0]]))

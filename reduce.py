@@ -8,7 +8,8 @@ use into Decanter's per-user cache; no line-list or cache paths are required.
 Example:
     python reduce.py --frames TOI2109/ --listfile TOI2109.txt \
         --calib <TOI2109-calib-dir> --out out/TOI2109 --jobs 8 \
-        --diagnostic-pdf
+        --diagnostic-pdf --serval-rv \
+        --serval-ephemeris examples/hrccs/toi2109b.toml
 
 Physical wavecal is enabled by default. Automatic mode selection uses
 hybrid_refit for HIRES-Y/J and hybrid_static for WIDE. Pass --no-wavecal only
@@ -72,6 +73,22 @@ def main() -> None:
     )
     parser.add_argument("--no-wavecal", action="store_true",
                         help="write an intentionally WARP-only reduction")
+    parser.add_argument(
+        "--serval-rv", action="store_true",
+        help="after physical wavecal, run SERVAL and write a one-observation RV-stability plot",
+    )
+    parser.add_argument(
+        "--serval-dir", type=Path,
+        help="SERVAL checkout (default: $SERVAL, ~/mzechmeister/serval, or ~/serval)",
+    )
+    parser.add_argument(
+        "--serval-ephemeris", type=Path,
+        help="TOML file whose [system] table defines period, transit midpoint, and duration",
+    )
+    parser.add_argument(
+        "--serval-telluric-threshold", type=float, default=0.995,
+        help="mask fitted transmission below this value for SERVAL (default: 0.995)",
+    )
     parser.add_argument("--overwrite", action="store_true",
                         help="allow writing into an existing non-empty output directory")
     args = parser.parse_args()
@@ -80,6 +97,12 @@ def main() -> None:
         parser.error("--jobs must be at least 1")
     if args.no_wavecal and args.diagnostic_pdf is not None:
         parser.error("--diagnostic-pdf requires physical wavecal")
+    if args.no_wavecal and args.serval_rv:
+        parser.error("--serval-rv requires physical wavecal")
+    if args.serval_rv and args.serval_ephemeris is None:
+        parser.error("--serval-rv requires --serval-ephemeris to exclude the transit")
+    if not 0.0 < args.serval_telluric_threshold <= 1.0:
+        parser.error("--serval-telluric-threshold must be in (0, 1]")
     if args.out.exists() and any(args.out.iterdir()) and not args.overwrite:
         parser.error(f"--out is not empty: {args.out}; pass --overwrite to reuse it")
 
@@ -110,6 +133,15 @@ def main() -> None:
         )
     if diagnostic is not None:
         print(f"Diagnostic report -> {diagnostic}")
+    if args.serval_rv:
+        result = decanter.run_serval_rv_stability(
+            series,
+            args.out,
+            ephemeris=args.serval_ephemeris,
+            serval_root=args.serval_dir,
+            telluric_threshold=args.serval_telluric_threshold,
+        )
+        print(f"SERVAL RV products -> {result.product_path.parent}")
 
 
 if __name__ == "__main__":

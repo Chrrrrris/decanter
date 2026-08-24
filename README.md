@@ -30,13 +30,52 @@ python reduce.py \
   --calib /data/TOI2109_calib \
   --out out/TOI2109 \
   --jobs 8 \
-  --diagnostic-pdf
+  --diagnostic-pdf \
+  --serval-rv \
+  --serval-ephemeris examples/hrccs/toi2109b.toml
 ```
 
 Without `--diagnostic-pdf`, wavecal still runs; only the report is skipped.
 Select a concrete method with `--wavecal hybrid_refit`, `--wavecal
 hybrid_static`, `--wavecal oh_refit`, or `--wavecal oh_static`. The default is
 `--wavecal auto`. Use `--no-wavecal` for an intentionally WARP-only reduction.
+
+`--serval-rv` is optional. When present, Decanter runs SERVAL only after the
+physical telluric/OH calibration has been applied and written. It uses Astropy
+for BERV and BJD, supplies the calibrated wavelength grid to SERVAL, and writes
+`OUT/serval_rv_stability/serval_rv_stability.pdf`, a PNG copy, exposure-level
+CSV/NPZ products, summary JSON, the SERVAL products, and a subprocess log. The
+figure contains the one observation supplied to `reduce.py`. In-transit
+exposures are excluded before SERVAL constructs its template or measures RVs;
+the omitted transit interval is shaded. Small symbols are individual
+out-of-transit exposure RVs and the two large black-edged symbols are the
+inverse-variance pre- and post-transit bins used in the reference notebook.
+
+SERVAL remains an external program. Point Decanter to a checkout with either
+`--serval-dir /path/to/serval` or `export SERVAL=/path/to/serval`. The fallback
+locations are `~/mzechmeister/serval` and `~/serval`. The default stellar-RV
+mask excludes fitted telluric transmission below 0.995; change this with
+`--serval-telluric-threshold`. Orders that retain too little usable interior
+wavelength coverage after masking are listed and excluded automatically. The
+SERVAL RV option is rejected with `--no-wavecal`.
+
+`--serval-ephemeris` is required with `--serval-rv`. It accepts the same TOML
+format as the downstream HRCCS examples and reads `period_days`,
+`transit_midpoint_bjd_tdb`, and `transit_duration_hours` from `[system]`.
+
+An already-written wavelength-calibrated reduction can be tested without
+repeating extraction or wavecal:
+
+```python
+import decanter
+
+result = decanter.run_serval_rv_stability_directory(
+    "out/TOI2109",
+    ephemeris="examples/hrccs/toi2109b.toml",
+    serval_root="/path/to/serval",
+)
+print(result.exposure_rms_mps, result.figure_pdf)
+```
 
 ```python
 import decanter

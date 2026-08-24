@@ -342,21 +342,50 @@ def _common_mode(velocity, accepted):
 def _to_object_epoch(oh_velocity, series, telluric_common):
     """Move an OH measurement from the sky frame's epoch to the object frame's.
 
-    The sky frame is a different exposure -- 92 s apart on WASP-69b, 340 s on
-    the HIRES sets -- and the instrument drifts in between. On a dataset moving
-    at 50 m/s per minute that offset alone is tens of m/s, so the telluric
-    drift curve is used to carry the OH measurement to the object's epoch.
+    The sky spectrum is deliberately *not* shifted by Decanter's first-layer
+    WARP alignment, while the common reference grid is defined by the shifted
+    object spectra.  Follow the validation notebook literally when the
+    provenance is available: subtract the recorded WARP shift of the paired
+    sky exposure, converted to velocity on each order's native-equivalent
+    grid.  This removes the large alignment term before an OH measurement is
+    allowed to anchor the object wavelength solution.
+
+    Older/in-memory Series objects may not carry OBJFRAME, SKYFRAME and
+    WAVSHIFT metadata.  Only for those rows do we retain the previous
+    telluric-time interpolation as a compatibility fallback.
     """
+    result = np.asarray(oh_velocity, dtype=float).copy()
+    metadata = getattr(series, "meta", None)
+    exact = np.zeros(series.n_frames, dtype=bool)
+    if metadata is not None and len(metadata) == series.n_frames:
+        shift_by_frame = {}
+        for frame_id, row in zip(series.frame_ids, metadata, strict=True):
+            object_frame = str(row.get("OBJFRAME", frame_id)).strip()
+            value = row.get("WAVSHIFT", row.get("WAVESHIFT", np.nan))
+            try:
+                shift = float(value)
+            except (TypeError, ValueError):
+                shift = np.nan
+            if object_frame and np.isfinite(shift):
+                shift_by_frame[object_frame] = shift
+        for index, row in enumerate(metadata):
+            sky_frame = str(row.get("SKYFRAME", "")).strip()
+            sky_shift = shift_by_frame.get(sky_frame, np.nan)
+            if np.isfinite(sky_shift):
+                result[index] -= sky_shift * np.asarray(series.dv_pix_kms, dtype=float)
+                exact[index] = True
+
+    fallback = ~exact
     good = np.isfinite(series.time_jd) & np.isfinite(telluric_common)
-    if np.count_nonzero(good) < 2:
-        return oh_velocity.copy()
-    order = np.argsort(series.time_jd[good])
-    times = series.time_jd[good][order]
-    drift = telluric_common[good][order]
-    at_object = np.interp(series.time_jd, times, drift)
-    at_sky = np.interp(series.sky_time_jd, times, drift)
-    correction = np.where(np.isfinite(series.sky_time_jd), at_object - at_sky, 0.0)
-    return oh_velocity + correction[:, None]
+    if np.any(fallback) and np.count_nonzero(good) >= 2:
+        order = np.argsort(series.time_jd[good])
+        times = series.time_jd[good][order]
+        drift = telluric_common[good][order]
+        at_object = np.interp(series.time_jd, times, drift)
+        at_sky = np.interp(series.sky_time_jd, times, drift)
+        correction = np.where(np.isfinite(series.sky_time_jd), at_object - at_sky, 0.0)
+        result[fallback] += correction[fallback, None]
+    return result
 
 
 def solve(series, config: WavecalConfig | None = None, *, verbose: bool = True,
