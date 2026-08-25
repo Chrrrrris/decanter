@@ -1,14 +1,13 @@
 """Measuring a per-frame shift against a template.
 
-One estimator, used for both references: build a bank of the template
-interpolated onto a grid of trial shifts, correlate every frame against the
-whole bank in a single matrix product, and refine the peak. The template is
-the physical one (telluric transmission from HITRAN, OH emission at
-laboratory positions), so the shift it returns is absolute.
+One estimator serves both references: interpolate the template onto a grid of
+trial shifts, correlate every frame against the whole bank in one matrix
+product, and refine the peak with a parabola. The templates are physical
+(HITRAN telluric transmission, OH emission at laboratory positions), so the
+shifts are absolute.
 
-All widths are specified in resolution elements or km/s and converted to
-pixels per order, because WINERED's sampling varies by a factor of five
-between instrument modes.
+Widths are given in resolution elements or km/s and converted to pixels per
+order, since WINERED's sampling varies by a factor of five between modes.
 """
 
 from __future__ import annotations
@@ -98,8 +97,8 @@ def ccf_shifts(
 
     Returns:
         ``(shift_pixels, peak_correlation)``, each ``(n_frames,)``. A frame
-        whose CCF peaks on the first or last trial shift is returned as NaN:
-        the true shift lies outside the search range, so the value would be
+        whose CCF peaks on the first or last trial shift returns NaN: its true
+        shift is outside the search range, so the peak position would be
         pinned at the boundary rather than measured.
     """
     signal = np.atleast_2d(np.asarray(signal, dtype=float))

@@ -91,10 +91,10 @@ class Reduction:
             when ``save_intermediates=True`` was passed.
         meta: observation metadata carried from the raw object frame
             (see :data:`decanter.io.headers.FRAME_META_KEYS`), plus
-            ``OBJFRAME``/``SKYFRAME`` and the applied ``WAVSHIFT``. Written
-            into every output spectrum's header by :meth:`write_to`, so a
-            multi-frame analysis can recover mid-times, pointing and the
-            instrument configuration from the reduced products alone.
+            ``OBJFRAME``/``SKYFRAME`` and the applied ``WAVSHIFT``.
+            :meth:`write_to` writes it into every output spectrum's header,
+            so mid-times, pointing and instrument configuration are readable
+            off the reduced products.
     """
 
     obj_name: str

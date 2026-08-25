@@ -194,11 +194,10 @@ def _residual_cube(paths, count):
 
 
 def _filtered_cube(model, paths, count):
-    # Reproduce the notebook's exact template transfer.  The moving absolute
-    # depth is multiplied into the rank-N stellar/telluric scaling matrix;
-    # both the injected and uninjected scaling matrices are independently
-    # refit by an N-component SVD, and their residual difference is the CCF
-    # template.  This is deliberately not the first-order U U^T projection.
+    # The moving absolute depth is multiplied into the rank-N
+    # stellar/telluric scaling matrix; the injected and uninjected scaling
+    # matrices are each refit by an N-component SVD and their residual
+    # difference is the CCF template. Not the first-order U U^T projection.
     filtered = []
     for order, path in enumerate(paths):
         scaling = path.lower[min(count, max(path.lower))]

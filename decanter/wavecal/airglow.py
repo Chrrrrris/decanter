@@ -1,26 +1,23 @@
 """OH airglow emission: the second reference of the hybrid ladder.
 
-Telluric absorption anchors the orders that have it. Roughly half the detector
-does not: in the Y band only a handful of orders carry usable water, and
-without a second reference every other order falls through to a smooth
-interpolation across order number. OH airglow fills exactly those gaps, because
-the night sky emits Meinel-band lines across the whole near-infrared.
+Telluric absorption anchors only the orders that carry it. In the Y band that
+is a handful of orders, and the rest would fall through to a smooth
+interpolation across order number. The night sky emits OH Meinel-band lines
+across the whole near-infrared, which covers those gaps.
 
-OH is **not** in LTE. The emission comes from vibrationally excited OH near
-87 km, so HITRAN's 296 K line intensities are meaningless here -- they run to
-``exp(logsij0) ~ 1e-40``. What HITRAN does give correctly is the line
-positions, the Einstein A coefficients, the upper-state degeneracies and the
-lower-state energies. So the line physics is kept and only the level
-populations are freed:
+OH is not in LTE: the emission comes from vibrationally excited OH near 87 km,
+so HITRAN's 296 K intensities do not apply and run to
+``exp(logsij0) ~ 1e-40``. The line positions, Einstein A coefficients,
+upper-state degeneracies and lower-state energies are still correct, so the
+line physics is kept and only the level populations are freed:
 
     I_i  proportional to  N_v' * g_u,i * A_i * exp(-c2 E_rot,u,i / T_rot)
 
-with one free population per vibrational level (a softmax, so the overall
-normalisation lives in the per-order throughput) and a single rotational
-temperature shared by every band and every order. That is two global numbers
-plus eight per order, against one free amplitude per line: the physical model
-cannot invent an emission line where the data happen to have a noise spike,
-and a fake line biases the CCF centroid.
+with one population per vibrational level (a softmax, so the overall
+normalisation stays in the per-order throughput) and one rotational
+temperature shared across every band and order. Two global parameters plus
+eight per order, rather than one amplitude per line, so the model cannot put
+an emission line on a noise spike and pull the CCF centroid with it.
 """
 
 from __future__ import annotations
@@ -36,10 +33,10 @@ from decanter.wavecal.telluric import (
     KERNEL_RADIUS, LSF_FAMILIES, SHAPE_PARAMETERS, _jax, lsf_kernel_numpy,
 )
 
-#: OH X2Pi vibrational term values in cm-1, measured from v=0. Used to assign
-#: an upper vibrational level to each line from its upper-state energy: the
-#: levels are ~2500-3500 cm-1 apart while the populated rotational ladder
-#: reaches only ~2000 cm-1, so the assignment is unambiguous.
+#: OH X2Pi vibrational term values in cm-1, measured from v=0. Each line is
+#: assigned an upper vibrational level from its upper-state energy; the levels
+#: are ~2500-3500 cm-1 apart and the populated rotational ladder reaches only
+#: ~2000 cm-1, so the assignment is unambiguous.
 VIBRATIONAL_TERMS = np.array(
     [0.0, 3568.0, 6974.0, 10214.0, 13290.0, 16200.0, 18942.0, 21513.0, 23906.0, 26113.0]
 )
@@ -332,8 +329,8 @@ def fit_templates(series, config, *, verbose=True) -> AirglowModel:
         if verbose:
             print(f"    [OH] {family:16s} scanned", flush=True)
 
-    # A single code has to drive the vmapped model, so the final fit runs with
-    # the most frequently selected family; per-order winners are recorded.
+    # The vmapped model takes one family code, so the final fit uses the most
+    # frequently selected family; the per-order winners are recorded above.
     final_code = int(np.bincount(best_code, minlength=len(LSF_FAMILIES)).argmax())
     amplitudes, parameters, models, trot, populations = run(
         jnp.asarray(final_code, dtype=jnp.int32), ADAM_STEPS)

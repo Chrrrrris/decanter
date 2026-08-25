@@ -1,19 +1,18 @@
 """Load a whole decanter reduction directory onto a common per-order grid.
 
-The wavelength calibration is a property of a *set* of frames, so the first
-thing it needs is the set: every frame's object and sky spectrum, resampled
-onto one reference grid per order, plus the timing and pointing metadata that
-:mod:`decanter.io.headers` now propagates onto the products.
+The calibration is measured across a set of frames, so the loader returns the
+whole set: every frame's object and sky spectrum resampled onto one reference
+grid per order, plus the timing and pointing metadata that
+:mod:`decanter.io.headers` propagates onto the products.
 
-The reference grid is uniform in ``ln(lambda)``. On such a grid a Doppler
-shift is exactly a constant pixel shift, so the CCF pixel scale is a single
-number per order instead of a function of position, and a measured shift
-converts to a velocity by one multiplication.
+The reference grid is uniform in ``ln(lambda)``, where a Doppler shift is a
+constant pixel shift. The CCF pixel scale is then one number per order and a
+measured shift converts to a velocity by a single multiplication.
 
-The grid spans, per order, from the largest first wavelength to the smallest
-last wavelength over all frames, so no frame is ever extrapolated. It carries
-``max_order(min_frame(N_native))`` samples: enough that no order is
-down-sampled relative to its own native grid.
+Per order the grid spans the largest first wavelength to the smallest last
+wavelength over all frames, so no frame is extrapolated, and carries
+``max_order(min_frame(N_native))`` samples, so no order is down-sampled
+relative to its own native grid.
 """
 
 from __future__ import annotations
@@ -47,12 +46,10 @@ class Series:
         obj / sky: ``(n_frames, n_pixels, n_orders)`` resampled flux. ``sky``
             is None when the reduction carried no sky path.
         noise_fraction: ``(n_frames, n_orders)`` fractional pixel noise
-            measured on the **native** grid. Resampling correlates
-            neighbouring pixels, so the usual adjacent-difference estimate is
-            biased low if taken afterwards.
-        time_jd / sky_time_jd: mid-exposure times. The sky frame is a
-            different exposure, so on a fast-drifting dataset the two differ
-            by enough to matter.
+            measured on the native grid. Resampling correlates neighbouring
+            pixels, which biases the adjacent-difference estimate low.
+        time_jd / sky_time_jd: mid-exposure times. The sky is a separate
+            exposure, typically 1-6 minutes from the object frame.
         airmass, instmode, meta: per-frame metadata from the headers.
     """
 
@@ -155,10 +152,10 @@ def _index_frame(frame_dir: Path) -> dict[str, dict[tuple[float, int], Path]]:
 def frame_ids_from_reductions(reductions: list[Reduction]) -> tuple[str, ...]:
     """Return stable IDs for reduction *pairs* without changing OBJFRAME.
 
-    Original Decanter permits one object exposure to be reduced against more
-    than one sky exposure.  Physical wavecal needs a unique row per resulting
-    pair, so duplicate object names are disambiguated with SKYFRAME while the
-    original object and sky metadata remain untouched.
+    Decanter permits one object exposure to be reduced against more than one
+    sky exposure. The wavecal needs a unique row per pair, so duplicate object
+    names are disambiguated with SKYFRAME; the object and sky metadata are
+    unchanged.
     """
     rows = []
     for index, reduction in enumerate(reductions):
@@ -201,10 +198,8 @@ def from_reductions(
 ) -> Series:
     """Put in-memory Decanter reductions on the wavecal reference grid.
 
-    This is the bridge between the WARP-compatible reduction/alignment pass
-    and the optional physical wavelength-calibration pass.  It is equivalent
-    to writing every :class:`~decanter.Reduction` to disk and calling
-    :func:`load_series`, but avoids a disk round trip inside
+    Equivalent to writing every :class:`~decanter.Reduction` to disk and
+    calling :func:`load_series`, without the round trip through disk inside
     :func:`decanter.reduce_many`.
     """
     if not reductions:
@@ -400,17 +395,16 @@ def load_series(
     time_by_id = {row["obj_frame"]: row["time_jd"] for row in records}
 
     size = int(n_pixels) if n_pixels else int(np.max(native))
-    # Inset by a hair. The endpoints are exactly a native sample of the
-    # narrowest frame, and floating-point rounding can push the first or last
-    # reference sample a fraction of an ulp outside it, which np.interp would
-    # return as NaN. The inset is ~1e-6 A, far below any velocity of interest.
+    # The endpoints are exactly a native sample of the narrowest frame, so
+    # rounding can push the first or last reference sample an ulp outside it
+    # and np.interp returns NaN. The inset of ~1e-6 A avoids that.
     inset = 1.0e-10
     wave = np.empty((size, len(order_list)), dtype=float)
     for j in range(len(order_list)):
         wave[:, j] = np.exp(
             np.linspace(np.log(low[j] * (1.0 + inset)), np.log(high[j] * (1.0 - inset)), size)
         )
-    # Derived from the grid itself, so it stays exact after the inset above.
+    # Read back off the grid, so the inset above is included.
     dv_pix = C_KMS * (np.log(wave[-1, :]) - np.log(wave[0, :])) / (size - 1)
 
     # --- pass 2: resample -------------------------------------------------

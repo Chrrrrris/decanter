@@ -55,12 +55,10 @@ def get(header: fits.Header | dict[str, Any], key: str, default: Any = "N/A") ->
 
 # Keys carried from the raw frame header onto every 1D output spectrum.
 #
-# decanter's outputs previously held the WCS alone, which is enough to reduce a
-# frame but not to do anything with a *set* of frames: a time series needs the
-# mid-exposure time, the pointing and the site to derive a BJD and a barycentric
-# correction, and needs the instrument configuration to know which calibration
-# regime it is in. Every one of those lives only in the raw frame, so it is
-# propagated here.
+# The WCS alone is enough to reduce one frame. A time series also needs the
+# mid-exposure time, the pointing and the site for a BJD and a barycentric
+# correction, and the instrument configuration to fix the calibration regime.
+# Those live only in the raw frame, so they are propagated here.
 FRAME_META_KEYS: tuple[str, ...] = (
     "OBJECT",
     "INSTRUME",
@@ -93,8 +91,8 @@ def frame_meta(
 ) -> dict[str, Any]:
     """Extract the propagated observation metadata from a raw frame header.
 
-    Missing keys are omitted rather than filled with ``"N/A"``, so a caller can
-    distinguish "not present in the raw frame" from "present and unreadable".
+    Missing keys are omitted rather than filled with ``"N/A"``, so a caller
+    can tell a key absent from the raw frame from one that is present.
 
     Args:
         header: the raw object-frame header.

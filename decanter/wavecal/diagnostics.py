@@ -1,13 +1,12 @@
 """Line-resolved diagnostic pages for the template fits.
 
-A per-order summary number tells you a fit is bad but not why. These pages show
-the fitted model on top of the data at a zoom where individual lines are
-resolved -- a few tens of resolution elements per panel -- so a wrong LSF width,
-a shifted template, a missing species or a stellar line being absorbed as
-telluric opacity are all visible by eye.
+The pages plot the fitted model over the data at a few tens of resolution
+elements per panel, where a wrong LSF width, a shifted template, a missing
+species or a stellar line absorbed as telluric opacity are separable by eye.
+A per-order summary number is not.
 
-The output is one long multi-page PDF, ordered by echelle order and then by
-wavelength within the order, meant to be flipped through.
+The output is one multi-page PDF, ordered by echelle order and then by
+wavelength within the order.
 """
 
 from __future__ import annotations
@@ -45,8 +44,8 @@ def telluric_template_pdf(
         support: optional ``(n_pixels, n_orders)`` CCF support mask, shaded on
             the panels so it is obvious which pixels drive the measurement.
         panel_resolution_elements: how much spectrum each panel covers. Sixty
-            resolution elements is about 250 pixels in HIRES, enough that a
-            line four pixels wide is clearly resolved.
+            resolution elements is about 250 pixels in HIRES, so a line four
+            pixels wide spans several points on the page.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -57,7 +56,7 @@ def telluric_template_pdf(
     path.parent.mkdir(parents=True, exist_ok=True)
     target = model.target
     if target is None:
-        raise ValueError("the model carries no fitted spectrum; refit with a recent decanter")
+        raise ValueError("the model carries no fitted spectrum (target is None)")
 
     with PdfPages(path) as pdf:
         # ---------------- summary page -----------------------------------
@@ -121,8 +120,8 @@ def telluric_template_pdf(
                     ax.set_ylim(0.05, 1.25)
                     ax.set_xlim(wave.min(), wave.max())
                     ax.tick_params(labelsize=7)
-                    # Absolute wavelengths on every panel: matplotlib's offset
-                    # notation ("+1.33e3") makes a flip-through PDF unreadable.
+                    # Absolute wavelengths on every panel; matplotlib's offset
+                    # notation ("+1.33e3") is unreadable page by page.
                     ax.ticklabel_format(axis="x", useOffset=False, style="plain")
                     ax.set_ylabel("norm. flux", fontsize=7)
                 for ax in axes[len(block):]:
@@ -154,10 +153,9 @@ def airglow_template_pdf(
 ) -> Path:
     """Write the per-order OH airglow fit as a long, zoomed-in PDF.
 
-    Individual detected lines are ticked, and the shaded band is the CCF
-    support -- the windows around detected lines that actually drive the
-    measurement. Everything outside them is ignored, which is why an
-    unmodelled feature in the middle of an order is not necessarily a problem.
+    Detected lines are ticked. The shaded band is the CCF support: the windows
+    around detected lines that drive the measurement. Pixels outside it do not
+    enter the CCF.
     """
     import matplotlib
     matplotlib.use("Agg")

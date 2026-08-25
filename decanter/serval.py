@@ -1,8 +1,8 @@
 """Optional post-wavecal SERVAL stellar-RV stability diagnostic.
 
 The physical wavelength calibration is already encoded in each reduction's
-WCS before this module is called.  SERVAL therefore receives those calibrated
-wavelengths literally; it is used only as the stellar RV estimator.
+WCS before this module is called. SERVAL reads those calibrated wavelengths
+as given and serves only as the stellar RV estimator.
 """
 
 from __future__ import annotations

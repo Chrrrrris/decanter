@@ -12,8 +12,8 @@ Example:
         --serval-ephemeris examples/hrccs/toi2109b.toml
 
 Physical wavecal is enabled by default. Automatic mode selection uses
-hybrid_refit for HIRES-Y/J and hybrid_static for WIDE. Pass --no-wavecal only
-when an intentionally WARP-only product is wanted.
+hybrid_refit for HIRES-Y/J and hybrid_static for WIDE. ``--no-wavecal`` gives
+a WARP-only product.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def main() -> None:
         help="write the optional wavecal report; default path is OUT/wavecal_diagnostics.pdf",
     )
     parser.add_argument("--no-wavecal", action="store_true",
-                        help="write an intentionally WARP-only reduction")
+                        help="write a WARP-only reduction, without physical wavecal")
     parser.add_argument(
         "--serval-rv", action="store_true",
         help="after physical wavecal, run SERVAL and write a one-observation RV-stability plot",

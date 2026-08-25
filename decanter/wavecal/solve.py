@@ -162,17 +162,15 @@ def assemble_hybrid_ladder(
 ):
     """Assemble the direct-reference hierarchy into a wavelength solution.
 
-    The priority is deliberately explicit and is shared with the calibration
-    notebook:
+    Priority:
 
     1. accepted telluric measurements are used literally;
     2. accepted OH measurements are used literally only where tellurics were
        not accepted;
     3. every remaining order receives the smooth cross-order interpolation.
 
-    The interpolation is constrained only by the direct references selected
-    by steps 1 and 2.  In particular, an interpolated OH trend never becomes a
-    second-generation anchor.
+    The interpolation is constrained only by the direct references from steps
+    1 and 2, so an interpolated value never becomes an anchor itself.
     """
     orders = np.asarray(order_values, dtype=float)
     telluric_velocity = np.asarray(telluric_velocity, dtype=float)
@@ -342,17 +340,15 @@ def _common_mode(velocity, accepted):
 def _to_object_epoch(oh_velocity, series, telluric_common):
     """Move an OH measurement from the sky frame's epoch to the object frame's.
 
-    The sky spectrum is deliberately *not* shifted by Decanter's first-layer
-    WARP alignment, while the common reference grid is defined by the shifted
-    object spectra.  Follow the validation notebook literally when the
-    provenance is available: subtract the recorded WARP shift of the paired
-    sky exposure, converted to velocity on each order's native-equivalent
-    grid.  This removes the large alignment term before an OH measurement is
-    allowed to anchor the object wavelength solution.
+    The sky spectrum does not carry Decanter's first-layer WARP alignment,
+    but the common reference grid is defined by the shifted object spectra.
+    Where the provenance is available, the paired sky exposure's recorded WARP
+    shift is subtracted, converted to velocity on each order's
+    native-equivalent grid, which removes the alignment term before OH anchors
+    the object solution.
 
-    Older/in-memory Series objects may not carry OBJFRAME, SKYFRAME and
-    WAVSHIFT metadata.  Only for those rows do we retain the previous
-    telluric-time interpolation as a compatibility fallback.
+    A Series without OBJFRAME, SKYFRAME and WAVSHIFT metadata falls back to
+    interpolating the telluric drift curve between the two epochs.
     """
     result = np.asarray(oh_velocity, dtype=float).copy()
     metadata = getattr(series, "meta", None)
@@ -406,9 +402,9 @@ def solve(series, config: WavecalConfig | None = None, *, verbose: bool = True,
         Path(config.linelist_dir).mkdir(parents=True, exist_ok=True)
         Path(config.cache_dir).mkdir(parents=True, exist_ok=True)
     except OSError:
-        # Restricted batch/container environments can expose an unwritable
-        # home cache. Keep the no-setup contract with a writable process-local
-        # fallback rather than asking for user-staged data paths.
+        # Batch and container environments can present an unwritable home
+        # cache. Fall back to a process-local directory so the run still needs
+        # no user-staged data paths.
         fallback = Path(tempfile.gettempdir()) / "decanter-wavecal"
         config = replace(
             config,
@@ -434,9 +430,8 @@ def solve(series, config: WavecalConfig | None = None, *, verbose: bool = True,
     refit_parameters = None
     refit_retained = np.zeros(shape, dtype=bool)
 
-    # The OH-only modes deliberately do not build or fit a telluric model.
-    # Besides making the source dispatch real, this lets OH-only calibration
-    # run with the OH line list alone.
+    # The OH-only modes build no telluric model at all, so they run with the
+    # OH line list alone.
     if config.uses_telluric:
         if verbose:
             print(f"  building ExoJAX optical depths for {list(config.species)}", flush=True)
@@ -552,9 +547,9 @@ def solve(series, config: WavecalConfig | None = None, *, verbose: bool = True,
         oh_accepted = (oh_rich[None, :] & np.isfinite(oh_velocity)
                        & (oh_peak >= config.oh_peak_threshold))
 
-        # Bring OH onto the telluric scale with one global constant. A
-        # per-order tie is not measurable: only a handful of orders carry both
-        # references, and their scatter swamps any per-order structure.
+        # Bring OH onto the telluric scale with one global constant. Only a
+        # handful of orders carry both references, too few to measure a
+        # per-order tie against their scatter.
         if config.uses_telluric and config.oh_tie == "global_constant":
             overlap = accepted & oh_accepted
             if np.count_nonzero(overlap) >= 5:

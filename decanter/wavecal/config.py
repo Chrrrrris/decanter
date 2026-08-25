@@ -1,10 +1,9 @@
 """Configuration for the wavelength-calibration pass.
 
-Every length here is a **velocity**, never a pixel count. WINERED's sampling
-changes by a factor of five between modes -- roughly 0.96 km/s per pixel in
-HIRES-Y and HIRES-J, but 5.1 km/s per pixel in WIDE -- so a bound written in
-pixels that is sensible in one mode is badly wrong in another. Pixel-space
-quantities are derived per order from the measured dispersion.
+Every width here is a velocity, not a pixel count: WINERED samples at about
+0.96 km/s per pixel in HIRES-Y and HIRES-J and 5.1 km/s per pixel in WIDE, so
+a bound in pixels does not carry between modes. Pixel-space quantities are
+derived per order from the measured dispersion.
 """
 
 from __future__ import annotations
@@ -14,8 +13,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 #: Nominal resolving power by WINERED instrument mode with the 100 um slit.
-#: Only used to seed the LSF bounds and to size masks; the effective line
-#: width is fitted per order and reported alongside.
+#: Seeds the LSF bounds and sizes the masks; the effective line width is
+#: fitted per order and reported alongside.
 NOMINAL_RESOLVING_POWER: dict[str, float] = {
     "WIDE": 28_000.0,
     "HIRES-Y": 68_000.0,

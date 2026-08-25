@@ -9,12 +9,10 @@ drawn from seven families, and a quadratic continuum ``C``. All orders are
 fitted at once with a vmapped Adam run per family and the family is chosen per
 order by BIC.
 
-Two bounds are load-bearing rather than cosmetic. The LSF width is confined to
-a range around the nominal resolving power, and the continuum term exists at
-all: without them the optimiser on a cool star widens the template and buys the
-star's own molecular bands with fake telluric opacity. That failure is not
-subtle -- it produced an apparent R of 24,000 and flagged 18 of 26 orders as
-telluric-rich on an M8 during development.
+The LSF width is bounded around the nominal resolving power and the continuum
+is fitted alongside it. Without both, the optimiser on a cool star widens the
+template and absorbs the star's own molecular bands as telluric opacity: on an
+M8 that gives an implied R of 24,000 and 18 of 26 orders flagged telluric-rich.
 """
 
 from __future__ import annotations
@@ -188,7 +186,7 @@ def fit_templates(series, tau, config, *, target=None, verbose=True) -> Telluric
             continue
         noise[j] = max(robust_scatter(row[ok]), 0.004)
         total = tau[:, :, j].sum(axis=0)
-        # floor at 0.02 so a line-free order does not have its noise promoted
+        # floor at 0.02, or a line-free order has its noise weighted up
         reference = max(float(np.nanpercentile(total[ok], 95.0)), 0.02)
         weights[j] = 0.25 + 2.75 * np.clip(total / reference, 0.0, 1.0)
 

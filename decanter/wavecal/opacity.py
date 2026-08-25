@@ -1,15 +1,12 @@
 """ExoJAX telluric optical depths, per order and per species.
 
-The wavelength reference has to be physical, otherwise the solution can only
-ever be relative: a template built from the data itself measures how each
-exposure differs from the others and is blind to an error they all share.
-These optical depths come from HITRAN line lists through ExoJAX, so the
-templates built on them sit at laboratory wavelengths and the shift measured
-against them is absolute.
+The optical depths come from HITRAN line lists through ExoJAX, so the
+templates built on them sit at laboratory wavelengths and the shifts measured
+against them are absolute. A template built from the data itself would only
+measure how the exposures differ from each other.
 
-ExoJAX, RADIS and JAX are optional. They are imported lazily so that
-``import decanter`` keeps working without them; only calling into this module
-requires them.
+ExoJAX, RADIS and JAX are optional dependencies, imported lazily so that
+``import decanter`` works without them.
 """
 
 from __future__ import annotations
@@ -22,7 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 #: Temperature and pressure of the effective absorbing layer. The fit rescales
-#: the column per order, so only the *shape* of tau matters here.
+#: the column per order, so only the shape of tau matters here.
 TEMPERATURE_K = 280.0
 PRESSURE_BAR = 0.5
 #: Resolving power of the internal grid tau is computed on, before the
@@ -79,7 +76,7 @@ def order_tau(wave_angstrom: NDArray, species: str, linelist: str | Path) -> tup
     """Optical depth of one species sampled on one order's wavelength grid.
 
     Returns ``(tau, meta)``. ``tau`` is all zeros when the species has no
-    transition inside the order -- a normal outcome, not an error.
+    transition inside the order.
     """
     mod = _imports()
     wave_um = np.asarray(wave_angstrom, dtype=float) * 1.0e-4

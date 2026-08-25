@@ -139,8 +139,8 @@ def final_four_panel(result, orbit, rv_grid, kp_grid, vsys_grid, expected_kp,
         axis.legend(frameon=False, fontsize=8)
         fig.colorbar(image, ax=axis, label="Map S/N")
     fig.suptitle(
-        f"{result.species} | observed local max={result.selected.local_peak_snr:+.2f}$\sigma$ | "
-        f"injected local max={result.injected.local_peak_snr:+.2f}$\sigma$ | "
+        rf"{result.species} | observed local max={result.selected.local_peak_snr:+.2f}$\sigma$ | "
+        rf"injected local max={result.injected.local_peak_snr:+.2f}$\sigma$ | "
         f"global-null FAP={result.null_false_alarm_fraction:.3f}"
     )
     _save(fig, Path(output) / f"{result.species}_final_kp_vsys", formats, dpi)

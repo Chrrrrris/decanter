@@ -631,10 +631,10 @@ class TemplateFactory:
                 xs = _kurucz_xsmatrix(opa, temperature, art.pressure)
                 molmass = float(np.nanmedian(np.asarray(adb.atomicmass)))
             else:
-                # Sparse atomic line lists routinely leave some bounded-memory
-                # chunks empty.  Those chunks still need their atmospheric
-                # continuum; only an entirely line-free *wide* model is an
-                # error (checked by _stitch_wide).
+                # Sparse atomic line lists leave some bounded-memory chunks
+                # empty. Those chunks still need their atmospheric continuum;
+                # only an entirely line-free wide model is an error, which
+                # _stitch_wide checks.
                 xs = None
                 molmass = None
         else:

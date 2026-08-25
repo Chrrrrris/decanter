@@ -166,8 +166,8 @@ def test_hybrid_ladder_matches_notebook_priority_exactly() -> None:
     orders = np.arange(159, 164)
     telluric_velocity = np.array([[10.0, np.nan, np.nan, np.nan, 50.0]])
     telluric_accepted = np.array([[True, False, False, False, True]])
-    # The first OH value deliberately conflicts with the telluric value. It
-    # must neither win nor enter the smooth anchor fit.
+    # The first OH value conflicts with the telluric value: it must neither
+    # win nor enter the smooth anchor fit.
     oh_velocity = np.array([[999.0, np.nan, 30.0, np.nan, np.nan]])
     oh_accepted = np.array([[True, False, True, False, False]])
     weight = np.ones_like(telluric_velocity)

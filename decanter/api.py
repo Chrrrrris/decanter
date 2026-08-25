@@ -344,9 +344,8 @@ def reduce(
     if save_intermediates:
         inter.strip_wcs = strips_lambda
 
-    # Observation metadata travels with the reduction so a multi-frame
-    # analysis can recover mid-times, pointing and instrument configuration
-    # from the reduced products without reopening the raw frames.
+    # Carried on the reduction so a multi-frame analysis can read mid-times,
+    # pointing and instrument configuration off the reduced products.
     meta = headers.frame_meta(obj_header)
     if obj_path is not None:
         meta["OBJFRAME"] = obj_path.stem
@@ -499,14 +498,12 @@ class TransitSeries:
 
         Each exposure is written to ``workdir/<SERIESID>/`` (normally the
         object-frame name; object/sky pair names disambiguate repeated object
-        frames). This method is
-        intentionally attached to the completed :class:`TransitSeries`, not
-        to an intermediate reduction step: when a physical wavecal solution
-        is present, the FITS WCS therefore contains the telluric/OH correction
-        layered on top of the original WARP alignment.
+        frames). Writing happens on the completed :class:`TransitSeries` rather
+        than at an intermediate step, so when a wavecal solution is present the
+        FITS WCS holds the telluric/OH correction on top of the WARP alignment.
 
         The root directory also receives ``warp_alignment.npz`` and, when
-        applicable, ``wavecal_solution.npz`` so the two calibration layers can
+        applicable, ``wavecal_solution.npz``, so the two calibration layers can
         be inspected or reproduced independently.
         """
         root = Path(workdir)
@@ -545,16 +542,16 @@ def calibrate_wavelengths(
 ) -> TransitSeries:
     """Layer physical telluric/OH wavecal on a WARP-aligned series.
 
-    This deliberately does not replace or recompute ``series.shifts``. The
-    WARP-compatible cross-frame correction remains the first calibration
-    layer; the hybrid solver measures the residual physical correction on its
-    output and updates only the wavelength WCS of each order.
+    ``series.shifts`` is neither replaced nor recomputed. The WARP cross-frame
+    correction stays the first calibration layer; the hybrid solver measures
+    the residual physical correction on its output and updates only the
+    wavelength WCS of each order.
     """
     if series.wavecal_solution is not None:
         raise ValueError("this TransitSeries already has a physical wavecal solution")
 
-    # Imported lazily so the base WARP-compatible pipeline retains its light
-    # dependency footprint and continues to work without the wavecal extra.
+    # Imported lazily so the base WARP-compatible pipeline still runs without
+    # the wavecal extra installed.
     from decanter.wavecal.config import WavecalConfig
     from decanter.wavecal.series import from_reductions
     from decanter.wavecal.solve import solve
@@ -616,10 +613,9 @@ def reduce_many(
     re-runs only the cheap wavelength-finalize tail with each frame's shift so
     every frame lands on the reference frame's grid. When ``wavecal_config``
     is supplied, the telluric/OH physical calibration is then solved from and
-    applied to those WARP-aligned products. The two layers remain separately
-    recorded in :class:`TransitSeries`. If ``workdir`` is supplied, writing is
-    deliberately deferred until this final state, so the saved FITS WCS
-    includes both layers rather than stopping at the original WARP solution.
+    applied to those WARP-aligned products. The two layers stay separately
+    recorded in :class:`TransitSeries`. With ``workdir``, writing waits for
+    that final state, so the saved FITS WCS carries both layers.
 
     Args:
         pairs: ``[(obj, sky), ...]`` — paths or arrays, as for :func:`reduce`.

@@ -14,9 +14,9 @@ from decanter.wavecal.telluric import transmission_numpy
 def telluric_product(run, path: str | Path) -> Path | None:
     """Save fitted telluric transmission on every calibrated exposure grid.
 
-    The saved transmission is deliberately continuous rather than thresholded.
-    A downstream analysis can therefore define ``mask = transmission < limit``
-    without refitting the atmosphere or inheriting somebody else's mask limit.
+    The transmission is saved continuous rather than thresholded, so a
+    downstream analysis can set its own ``mask = transmission < limit`` without
+    refitting the atmosphere.
     """
     model = run.telluric_model
     if model is None:

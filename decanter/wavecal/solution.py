@@ -14,16 +14,14 @@ and dividing that by a constant ``1 + v/c`` gives
 
     lambda_i / (1 + v/c) = CRVAL1/(1 + v/c) + (i - CRPIX1) * CDELT1/(1 + v/c),
 
-which is again linear. So a velocity correction is exactly a rescaling of
-``CRVAL1`` and ``CDELT1``, with no resampling. That matters: the alternative,
-shifting the spectrum with ``scopy``/``specshift`` the way the relative
-waveshift path does, interpolates the flux and correlates neighbouring pixels
-every time it runs.
+which is again linear, so a velocity correction is a rescaling of ``CRVAL1``
+and ``CDELT1`` with no resampling. The relative waveshift path instead moves
+the flux with ``scopy``/``specshift``, which interpolates and correlates
+neighbouring pixels on every application.
 
-Note that a rescaling is *not* the same as adding a constant offset in
-angstroms. Over one WINERED order ``lambda`` varies by about 1%, so a 2 km/s
-correction changes by roughly 20 m/s from one end of the order to the other --
-small, but not below the precision this module is trying to reach.
+A rescaling is not the same as a constant offset in angstroms: ``lambda``
+varies by about 1% across one WINERED order, so a 2 km/s correction differs by
+roughly 20 m/s between the two ends of an order.
 """
 
 from __future__ import annotations
@@ -63,8 +61,7 @@ class WavecalSolution:
             recording how each value was obtained.
         bracketed: ``(n_frames, n_orders)`` bool; True when an interpolated
             order lies inside the range spanned by that frame's direct
-            anchors. False marks an extrapolation, which is worth knowing
-            before trusting the value.
+            anchors, False when it is an extrapolation.
         mode: which of the four wavecal modes produced this.
         zero_point: ``"absolute"`` (anchored to the telluric rest frame) or
             ``"relative"`` (each order centred on its own median, so only the
