@@ -891,10 +891,12 @@ def calibrate_wavelengths(
 
     ``series.shifts`` is neither replaced nor recomputed. Normally the hybrid
     solver measures the residual after WARP alignment. With
-    ``config.atmospheric_prealign``, a first physical solve supplies templates
-    for a broad pooled telluric+OH CCF. Its common mode registers the spectra
-    in WCS, the atmospheric templates are rebuilt, and the fine hybrid solve
-    is repeated. This provides a no-WARP alignment path.
+    ``config.atmospheric_prealign``, a preparatory measurement pass supplies
+    templates and trusted orders for a broad pooled telluric+OH CCF; its
+    wavelength solution is not applied. The pooled common mode registers the
+    spectra in WCS, the atmospheric templates are rebuilt, and one final
+    hybrid solution is measured. Only the pooled registration and final
+    physical solution are composed into the output.
     """
     if series.wavecal_solution is not None:
         raise ValueError("this TransitSeries already has a physical wavecal solution")

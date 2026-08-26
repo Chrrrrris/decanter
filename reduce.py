@@ -15,7 +15,7 @@ Physical wavecal is enabled by default. Automatic mode selection uses
 hybrid_refit for HIRES-Y/J and hybrid_static for WIDE. ``--no-wavecal`` gives
 a WARP-only product. The default physical calibration is one pass over a
 +/-25 km/s telluric search. ``--alignment atmospheric`` explicitly enables
-the pooled atmospheric registration followed by a second physical solve.
+pooled atmospheric registration followed by the final physical solve.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def main() -> None:
     parser.add_argument(
         "--alignment", choices=("warp", "atmospheric", "none"), default="warp",
         help=("cross-frame alignment before physical wavecal: warp (default), "
-              "atmospheric (explicit two-pass pooled telluric/OH CCF + fine "
+              "atmospheric (pooled telluric/OH registration + final physical "
               "wavecal), or none; non-atmospheric wavecal uses one +/-25 km/s pass"),
     )
     parser.add_argument(

@@ -57,8 +57,8 @@ written spectra are calibrated without the flux being resampled.
 The command-line pipeline defaults to WARP cross-frame alignment followed by
 one physical-wavecal pass with a +/-25 km/s telluric search window. The OH
 search remains independently centred with its own +/-18 km/s window. To
-replace WARP alignment with the explicitly enabled two-pass atmospheric
-alignment, use:
+replace WARP alignment with the explicitly enabled atmospheric registration
+followed by physical calibration, use:
 
 ```bash
 python reduce.py \
@@ -68,14 +68,17 @@ python reduce.py \
   --alignment atmospheric --wavecal auto --diagnostic-pdf
 ```
 
-Only `--alignment atmospheric` runs the iterative path. Both physical solves
-use the same +/-25 km/s per-order search as the single-pass method; between
-them, it searches a broader +/-50 km/s common velocity grid that pools
-standardized CCFs
+Only `--alignment atmospheric` runs this path. Internally, a preparatory
+measurement builds the atmospheric templates and identifies trusted orders;
+its wavelength solution is not applied. The first applied correction searches
+a broader +/-50 km/s common velocity grid that pools standardized CCFs
 from telluric-rich object orders and OH-rich paired-sky orders. Tellurics take
 priority in orders rich in both references. The resulting time-variable shift
 registers all orders in wavelength before the atmospheric templates are
-rebuilt and the selected fine wavecal mode is run. The four wavecal choices
+rebuilt and the selected final wavecal mode is run with the same +/-25 km/s
+telluric window as the single-pass method. Only those two corrections—the
+pooled registration and final physical solution—are composed into the output.
+The four wavecal choices
 remain `oh_static`, `oh_refit`, `hybrid_static`, and `hybrid_refit`.
 `--alignment none` is available as an unregistered control.
 
