@@ -57,10 +57,13 @@ def shift_template(wave_um, template, velocity_kms):
 
 def planet_model_cube(wavelength_um, templates, phase, berv_kms, kp_kms, vsys_kms,
                       transit_weight, scale=1.0, *, wide_wavelength_um=None,
-                      wide_template=None):
+                      wide_template=None, velocity_sign=1.0,
+                      velocity_basis=None):
     n_frames = phase.size
     out = np.full((n_frames,) + templates.shape, np.nan)
-    velocity = kp_kms * np.sin(2.0 * np.pi * phase) + vsys_kms - berv_kms
+    basis = (velocity_sign * np.sin(2.0 * np.pi * phase)
+             if velocity_basis is None else np.asarray(velocity_basis, dtype=float))
+    velocity = kp_kms * basis + vsys_kms - berv_kms
     for i in range(n_frames):
         for j in range(templates.shape[0]):
             if wide_wavelength_um is None:
@@ -99,10 +102,13 @@ def combine_order_ccfs(order_ccf):
 
 
 def kp_vsys_map(exposure_ccf, rv_grid, phase, transit_weight, kp_grid, vsys_grid,
-                expected_kp, expected_vsys):
+                expected_kp, expected_vsys, velocity_sign=1.0,
+                velocity_basis=None):
     use = (transit_weight > 0) & np.any(np.isfinite(exposure_ccf), axis=1)
     result = np.full((kp_grid.size, vsys_grid.size), np.nan)
-    sine = np.sin(2.0 * np.pi * phase[use])
+    sine = (velocity_sign * np.sin(2.0 * np.pi * phase[use])
+            if velocity_basis is None
+            else np.asarray(velocity_basis, dtype=float)[use])
     weights = transit_weight[use]
     for row, kp in enumerate(kp_grid):
         orbital = (kp - expected_kp) * sine
@@ -161,7 +167,8 @@ def _map_summary(snr_map, kp_grid, vsys_grid, expected_kp, expected_vsys,
 
 def evaluate(count, residual_cube, filtered_model, wavelength_um, mask, phase,
              transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys,
-             sigma_clip, local_kp_half_width, local_vsys_half_width):
+             sigma_clip, local_kp_half_width, local_vsys_half_width,
+             velocity_sign=1.0, velocity_basis=None):
     order_ccf = []
     for order in range(residual_cube.shape[1]):
         order_ccf.append(fixed_pearson_ccf(
@@ -170,7 +177,8 @@ def evaluate(count, residual_cube, filtered_model, wavelength_um, mask, phase,
         ))
     combined = combine_order_ccfs(np.asarray(order_ccf))
     raw = kp_vsys_map(combined, rv_grid, phase, transit_weight, kp_grid, vsys_grid,
-                      expected_kp, expected_vsys)
+                      expected_kp, expected_vsys, velocity_sign=velocity_sign,
+                      velocity_basis=velocity_basis)
     snr = standardize_map(raw, sigma=sigma_clip)
     expected, local_peak, local_kp, local_vsys, peak, peak_kp, peak_vsys = _map_summary(
         snr, kp_grid, vsys_grid, expected_kp, expected_vsys,
@@ -236,7 +244,8 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
                 transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys,
                 counts, sigma_clip, local_kp_half_width, local_vsys_half_width,
                 injection_scale, seed, null_realizations, *,
-                wide_wavelength_um=None, wide_template=None, show_progress=True):
+                wide_wavelength_um=None, wide_template=None, velocity_sign=1.0,
+                velocity_basis=None, baseline_mask=None, show_progress=True):
     from tqdm.auto import tqdm
 
     progress = tqdm(
@@ -246,10 +255,20 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
         disable=not show_progress,
         dynamic_ncols=True,
     )
+    # The observed-data CCF only needs the line pattern. Keep it at its
+    # nominal amplitude so changing the synthetic injection strength cannot
+    # alter the observed component selection or observed Kp--Vsys map.
     expected_model = planet_model_cube(
+        wavelength_um, raw_templates, phase, berv_kms, expected_kp, expected_vsys,
+        transit_weight, scale=1.0,
+        wide_wavelength_um=wide_wavelength_um, wide_template=wide_template,
+        velocity_sign=velocity_sign, velocity_basis=velocity_basis,
+    )
+    injected_model = planet_model_cube(
         wavelength_um, raw_templates, phase, berv_kms, expected_kp, expected_vsys,
         transit_weight, scale=injection_scale,
         wide_wavelength_um=wide_wavelength_um, wide_template=wide_template,
+        velocity_sign=velocity_sign, velocity_basis=velocity_basis,
     )
     paths = _paths(prepared, mask, counts)
     components = []
@@ -261,13 +280,15 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
             wavelength_um, mask, phase, transit_weight, rv_grid, kp_grid, vsys_grid,
             expected_kp, expected_vsys, sigma_clip,
             local_kp_half_width, local_vsys_half_width,
+            velocity_sign, velocity_basis,
         ))
         progress.update()
     selected = _select_component(components)
 
-    oot = transit_weight <= 0
+    oot = (np.asarray(baseline_mask, dtype=bool)
+           if baseline_mask is not None else transit_weight <= 0)
     if np.count_nonzero(oot) < 2:
-        raise ValueError("injection recovery needs at least two out-of-transit exposures")
+        raise ValueError("injection recovery needs at least two out-of-event exposures")
     # Fully masked edge pixels are expected; avoid emitting one warning per order.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
@@ -287,15 +308,16 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
             0.0, noise_sigma[None, :, :], size=prepared.shape
         )
 
-    injected_data = synthetic(expected_model, seed)
+    injected_data = synthetic(injected_model, seed)
     injected_paths = _paths(injected_data, mask, (selected.count,))
     progress.set_postfix_str(f"injection rank {selected.count}", refresh=False)
     injected = evaluate(
         selected.count, _residual_cube(injected_paths, selected.count),
-        _filtered_cube(expected_model, injected_paths, selected.count),
+        _filtered_cube(injected_model, injected_paths, selected.count),
         wavelength_um, mask,
         phase, transit_weight, rv_grid, kp_grid, vsys_grid, expected_kp, expected_vsys, sigma_clip,
         local_kp_half_width, local_vsys_half_width,
+        velocity_sign, velocity_basis,
     )
     progress.update()
     null_maps, null_expected, null_global = [], [], []
@@ -312,6 +334,7 @@ def run_species(species, prepared, wavelength_um, raw_templates, mask, phase, be
             phase, transit_weight, rv_grid, kp_grid, vsys_grid,
             expected_kp, expected_vsys, sigma_clip,
             local_kp_half_width, local_vsys_half_width,
+            velocity_sign, velocity_basis,
         )
         # Match the injection recovery: every null uses the rank selected from
         # the observed data, without re-tuning on the null realization.

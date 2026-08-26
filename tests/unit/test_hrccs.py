@@ -22,6 +22,7 @@ from decanter.hrccs.config import (
     ReductionConfig,
     SearchConfig,
     SystemConfig,
+    load_config,
 )
 from decanter.hrccs.detrend import svd_path
 from decanter.hrccs.models import (
@@ -34,6 +35,7 @@ from decanter.hrccs.models import (
     _sample_instrument,
     _wide_wavelength_grid,
 )
+from decanter.hrccs.orbit import _orbital_velocity_basis
 from decanter.wavecal.products import telluric_product
 
 
@@ -126,6 +128,8 @@ def test_search_grid_steps_must_be_positive():
         replace(config, search=SearchConfig(kp_step_kms=0.0)).validate()
     with pytest.raises(ValueError, match="null_realizations"):
         replace(config, injection=InjectionConfig(null_realizations=0)).validate()
+    with pytest.raises(ValueError, match="injection scale"):
+        replace(config, injection=InjectionConfig(scale=0.0)).validate()
     with pytest.raises(ValueError, match="wide_model_chunk_points"):
         replace(config, atmosphere=AtmosphereConfig(wide_model_chunk_points=255)).validate()
 
@@ -143,6 +147,37 @@ def test_notebook_reduction_configuration_is_valid():
         ),
     )
     config.validate()
+
+
+def test_eclipse_configuration_uses_generic_event_fields():
+    config = HRCCSConfig(
+        input=InputConfig("products"),
+        system=SystemConfig(
+            observation_type="eclipse", period_days=4.0,
+            event_midpoint_bjd_tdb=2_460_000.0, event_duration_hours=2.0,
+            expected_kp_kms=170.0,
+        ),
+    )
+    config.validate()
+    assert config.system.event_midpoint == 2_460_000.0
+    assert config.system.event_duration == 2.0
+
+
+def test_circular_eclipse_velocity_has_opposite_transit_slope():
+    phase = np.linspace(-0.1, 0.1, 9)
+    transit = _orbital_velocity_basis(phase, "transit")
+    eclipse = _orbital_velocity_basis(phase, "eclipse")
+    np.testing.assert_allclose(transit, np.sin(2.0 * np.pi * phase))
+    np.testing.assert_allclose(eclipse, -transit)
+
+
+def test_eccentric_eclipse_velocity_includes_ecosomega_offset():
+    eccentricity = 0.066
+    omega = 54.0
+    basis = _orbital_velocity_basis(
+        np.asarray([0.0]), "eclipse", eccentricity, omega,
+    )
+    assert basis[0] == pytest.approx(-eccentricity * np.cos(np.deg2rad(omega)))
 
 
 def test_notebook_svd_is_linear_uncentered_svd():
@@ -218,6 +253,25 @@ def test_wide_template_is_built_once_then_sampled_per_order(tmp_path, mode, reso
     assert first.metadata["model_scope"] == "single wide-band template"
     assert first.metadata["wide_model_chunks"] > 1
     assert len(list((tmp_path / "templates").glob("H2O_*.npz"))) == 1
+
+
+def test_template_cache_key_ignores_orbital_geometry(tmp_path):
+    atmosphere = AtmosphereConfig(
+        backend="analytic", cache_dir=str(tmp_path), resolving_power=68_000.0,
+    )
+    base = SystemConfig(
+        stellar_radius_rsun=2.35, planet_radius_rjup=1.926,
+        planet_mass_mjup=12.37, equilibrium_temperature_k=3520.0,
+        metallicity_dex=-0.34,
+    )
+    eccentric = replace(
+        base, observation_type="eclipse", eccentricity=0.066,
+        argument_of_periastron_deg=54.0, event_midpoint_bjd_tdb=2_460_000.0,
+    )
+    wave = np.geomspace(0.95, 1.12, 1024)
+    first = TemplateFactory(base, atmosphere, instmode="HIRES-Y")
+    second = TemplateFactory(eccentric, atmosphere, instmode="HIRES-Y")
+    assert first._path("H2O", wave) == second._path("H2O", wave)
 
 
 @pytest.mark.parametrize("resolution", [28_000.0, 68_000.0])
@@ -345,3 +399,48 @@ def test_wavecal_telluric_product_is_continuous_and_unthresholded(tmp_path):
         np.testing.assert_allclose(product["transmission"][0], native.T)
         assert np.any((product["transmission"] > 0.60)
                       & (product["transmission"] < 0.99))
+
+
+def _config_text(observation_type: str, scope: str) -> str:
+    return (
+        'output_dir = "out"\n'
+        "[input]\n"
+        'decanter_dir = "spectra"\n'
+        "[system]\n"
+        f'observation_type = "{observation_type}"\n'
+        "period_days = 4.0\n"
+        "event_midpoint_bjd_tdb = 2459315.7361\n"
+        "event_duration_hours = 2.2\n"
+        "expected_kp_kms = 160.0\n"
+        "[reduction]\n"
+        f'telluric_mask_scope = "{scope}"\n'
+    )
+
+
+def test_transit_only_mask_alias_is_rejected_for_an_eclipse(tmp_path) -> None:
+    """On an eclipse, "in_transit" would select out-of-eclipse exposures.
+
+    The alias resolves to the signal exposures, which is right for a transit
+    and the opposite of what the name says for an eclipse.
+    """
+    path = tmp_path / "eclipse.toml"
+    path.write_text(_config_text("eclipse", "in_transit"))
+
+    with pytest.raises(ValueError, match="transit-only alias"):
+        load_config(path)
+
+
+def test_transit_only_mask_alias_still_works_for_a_transit(tmp_path) -> None:
+    path = tmp_path / "transit.toml"
+    path.write_text(_config_text("transit", "in_transit"))
+
+    config = load_config(path)
+
+    assert config.reduction.telluric_mask_scope == "in_transit"
+
+
+def test_signal_scope_is_accepted_for_both_geometries(tmp_path) -> None:
+    for observation_type in ("transit", "eclipse"):
+        path = tmp_path / f"{observation_type}.toml"
+        path.write_text(_config_text(observation_type, "signal"))
+        assert load_config(path).reduction.telluric_mask_scope == "signal"

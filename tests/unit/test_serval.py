@@ -55,16 +55,20 @@ def test_two_chronological_bins_use_inverse_variance_weights() -> None:
     np.testing.assert_array_equal(count, [2, 2])
 
 
-def test_oot_bins_are_split_across_excluded_transit() -> None:
-    time = np.asarray([1.0, 1.1, 1.9, 2.0])
-    value = np.asarray([10.0, 20.0, 30.0, 40.0])
-    error = np.ones(4)
-    bin_time, bin_value, _, count = _two_bins(
-        time, value, error, excluded_window=np.asarray([1.2, 1.8])
-    )
-    np.testing.assert_allclose(bin_time, [1.05, 1.95])
-    np.testing.assert_allclose(bin_value, [-10.0, 10.0])
-    np.testing.assert_array_equal(count, [2, 2])
+def test_two_bins_split_by_time_not_by_the_transit() -> None:
+    """Both halves are equal counts of exposures, wherever the transit fell."""
+    # Five exposures with the gap between the second and third: an even split
+    # by count puts three in the first bin, which a pre/post split would not.
+    time = np.asarray([1.0, 1.1, 1.9, 2.0, 2.1])
+    value = np.asarray([10.0, 20.0, 30.0, 40.0, 50.0])
+    error = np.ones(5)
+
+    bin_time, bin_value, _, count = _two_bins(time, value, error)
+
+    np.testing.assert_array_equal(count, [3, 2])
+    np.testing.assert_allclose(bin_time, [np.mean(time[:3]), np.mean(time[3:])])
+    # Bins average to 20 and 45; the display is centered on their mean, 32.5.
+    np.testing.assert_allclose(bin_value, [-12.5, 12.5])
 
 
 def test_complete_serval_table_matches_in_order_with_duplicate_bjd() -> None:
@@ -102,6 +106,19 @@ def test_ephemeris_reads_hrccs_system_table(tmp_path) -> None:
     ephemeris = TransitEphemeris.from_toml(path)
     assert ephemeris.period_days == 3.0
     assert ephemeris.transit_duration_hours == 2.5
+
+
+def test_eclipse_ephemeris_reads_generic_event_fields(tmp_path) -> None:
+    path = tmp_path / "target.toml"
+    path.write_text(
+        "[system]\nobservation_type='eclipse'\nperiod_days=4.0\n"
+        "event_midpoint_bjd_tdb=2459001.0\nevent_duration_hours=2.25\n"
+    )
+    ephemeris = TransitEphemeris.from_toml(path)
+    assert ephemeris.observation_type == "eclipse"
+    assert ephemeris.event_midpoint_bjd_tdb == 2459001.0
+    assert ephemeris.event_duration_hours == 2.25
+    assert ephemeris.out_of_event_abbreviation == "OOE"
 
 
 def test_telluric_product_is_mapped_and_dilated(tmp_path) -> None:
@@ -313,3 +330,68 @@ def test_oh_mask_maps_orders_by_number_not_position() -> None:
     # Order 161 carried no OH lines, so dropping 160 must not shift its mask on.
     assert mask.shape == (1, series.n_pixels)
     assert not np.any(mask)
+
+
+def test_ephemeris_carries_the_planet_name_for_the_figure_title(tmp_path) -> None:
+    """Frame headers often name the star, or nothing; the TOML names the planet."""
+    config = tmp_path / "system.toml"
+    config.write_text(
+        "[system]\n"
+        'planet_name = "WASP-69 b"\n'
+        "period_days = 3.8681382\n"
+        "transit_midpoint_bjd_tdb = 2455748.83344\n"
+        "transit_duration_hours = 2.1792\n"
+    )
+
+    ephemeris = TransitEphemeris.from_toml(config)
+
+    assert ephemeris.planet_name == "WASP-69 b"
+
+
+def test_ephemeris_without_a_planet_name_is_still_valid(tmp_path) -> None:
+    config = tmp_path / "system.toml"
+    config.write_text(
+        "[system]\n"
+        "period_days = 3.8681382\n"
+        "transit_midpoint_bjd_tdb = 2455748.83344\n"
+        "transit_duration_hours = 2.1792\n"
+    )
+
+    ephemeris = TransitEphemeris.from_toml(config)
+
+    assert ephemeris.planet_name == ""
+
+
+def _ephemeris(observation_type: str) -> TransitEphemeris:
+    return TransitEphemeris(
+        period_days=2.0,
+        transit_midpoint_bjd_tdb=2460000.0,
+        transit_duration_hours=2.4,
+        observation_type=observation_type,
+    )
+
+
+def test_eclipse_keeps_the_exposures_where_the_planet_is_hidden() -> None:
+    """Emission contaminates the star whenever the dayside is visible.
+
+    A transit imprints the planet on the stellar lines while it crosses the
+    disc, so the in-event exposures are the bad ones. An eclipse hides the
+    planet, so those are the only clean ones -- the selection inverts.
+    """
+    from decanter.serval import _event_selection, _uncontaminated_exposures
+
+    # Six exposures inside a 2.4 h event centred on the midpoint, six outside.
+    bjd = 2460000.0 + np.concatenate([
+        np.linspace(-0.04, 0.04, 6), np.linspace(0.12, 0.20, 6),
+    ])
+    in_event, _ = _event_selection(bjd, bjd - 0.002, _ephemeris("transit"))
+    assert np.count_nonzero(in_event) == 6
+
+    transit_keep, transit_used, _ = _uncontaminated_exposures(in_event, "transit")
+    eclipse_keep, eclipse_used, _ = _uncontaminated_exposures(in_event, "eclipse")
+
+    np.testing.assert_array_equal(transit_keep, ~in_event)
+    np.testing.assert_array_equal(eclipse_keep, in_event)
+    np.testing.assert_array_equal(transit_keep, ~eclipse_keep)
+    assert transit_used == "out-of-transit"
+    assert eclipse_used == "in-eclipse"

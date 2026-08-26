@@ -6,9 +6,10 @@ decanter_dir = "../outputs/decanter_validation/wasp69b"
 
 [system]
 planet_name = "WASP-69 b"
+observation_type = "transit"
 period_days = 3.8681382
-transit_midpoint_bjd_tdb = 2455748.834240741
-transit_duration_hours = 2.2296
+event_midpoint_bjd_tdb = 2455748.834240741
+event_duration_hours = 2.2296
 expected_kp_kms = 127.055
 ra_deg = 315.0242916667
 dec_deg = -5.0963611111
@@ -27,7 +28,7 @@ cache_dir = "~/.cache/decanter/hrccs"
 
 [reduction]
 telluric_threshold = 0.50
-telluric_mask_scope = "in_transit"
+telluric_mask_scope = "signal"
 edge_trim_pixels = 0
 ccf_lsf_margin_widths = 3.0
 svd_components = [10]

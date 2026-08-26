@@ -62,7 +62,9 @@ class WavecalConfig:
         fsr_cut: which FSR cut to read; None takes the widest present.
         resolving_power: nominal R. 0 means look it up from the frame's
             ``INSTMODE``.
-        shift_search_kms: half-width of the shift search.
+        shift_search_kms: half-width of the single-pass telluric shift search.
+            The default is +/-25 km/s. Atmospheric prealignment remains an
+            explicitly enabled two-pass procedure.
         lsf_sigma_bounds: multiples of the nominal LSF sigma that bound the
             fit. The lower bound matters: without it the optimiser widens the
             template until it can absorb stellar features.
@@ -104,7 +106,7 @@ class WavecalConfig:
     species: tuple[str, ...] = ("H2O", "CH4", "O2")
     fsr_cut: float | None = None
     resolving_power: float = 0.0
-    shift_search_kms: float = 12.0
+    shift_search_kms: float = 25.0
     lsf_sigma_bounds: tuple[float, float] = (0.5, 2.0)
     edge_trim_resolution_elements: float = 12.0
     telluric_rms_threshold: float = 0.05

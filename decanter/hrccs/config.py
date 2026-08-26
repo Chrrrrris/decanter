@@ -31,10 +31,17 @@ class InputConfig:
 @dataclass(frozen=True)
 class SystemConfig:
     planet_name: str | None = None
+    observation_type: str = "transit"
     period_days: float = 0.0
+    event_midpoint_bjd_tdb: float | None = None
+    event_duration_hours: float | None = None
+    # Backward-compatible transit names. New configurations should use the
+    # generic event fields above so the same schema works for eclipses.
     transit_midpoint_bjd_tdb: float = 0.0
     transit_duration_hours: float = 0.0
     expected_kp_kms: float = 0.0
+    eccentricity: float = 0.0
+    argument_of_periastron_deg: float = 90.0
     ra_deg: float | None = None
     dec_deg: float | None = None
     stellar_rv_kms: float | None = None
@@ -47,6 +54,18 @@ class SystemConfig:
     observatory_lat_deg: float = -29.0146
     observatory_height_m: float = 2380.0
     iers_auto_download: bool = True
+
+    @property
+    def event_midpoint(self) -> float:
+        return (float(self.event_midpoint_bjd_tdb)
+                if self.event_midpoint_bjd_tdb is not None
+                else float(self.transit_midpoint_bjd_tdb))
+
+    @property
+    def event_duration(self) -> float:
+        return (float(self.event_duration_hours)
+                if self.event_duration_hours is not None
+                else float(self.transit_duration_hours))
 
 
 @dataclass(frozen=True)
@@ -114,7 +133,13 @@ class ReductionConfig:
     # The reduction reproduces the minimal-processing WASP-69b reference:
     # linear-flux SVD and exact injected-template SVD refitting.
     telluric_threshold: float = 0.90
-    telluric_mask_scope: str = "in_transit"
+    # Which exposures the telluric minimum is taken over. "signal" is the
+    # ones being cross-correlated: in transit for transmission, out of eclipse
+    # for emission. "event"/"out_of_event" name the geometry directly, and
+    # "all" uses every exposure. "in_transit" is a pre-eclipse alias for
+    # "signal", accepted only for transit configurations -- on an eclipse it
+    # would select out-of-eclipse exposures, which is not what it says.
+    telluric_mask_scope: str = "signal"
     edge_trim_pixels: int = 0
     ccf_lsf_margin_widths: float = 3.0
     min_valid_pixels: int = 100
@@ -165,10 +190,14 @@ class HRCCSConfig:
     show_progress: bool = True
 
     def validate(self) -> None:
-        if self.system.period_days <= 0 or self.system.transit_duration_hours <= 0:
-            raise ValueError("system period_days and transit_duration_hours must be positive")
-        if self.system.transit_midpoint_bjd_tdb <= 0 or self.system.expected_kp_kms <= 0:
-            raise ValueError("system transit_midpoint_bjd_tdb and expected_kp_kms are required")
+        if self.system.observation_type not in {"transit", "eclipse"}:
+            raise ValueError("system observation_type must be 'transit' or 'eclipse'")
+        if self.system.period_days <= 0 or self.system.event_duration <= 0:
+            raise ValueError("system period_days and event_duration_hours must be positive")
+        if self.system.event_midpoint <= 0 or self.system.expected_kp_kms <= 0:
+            raise ValueError("system event_midpoint_bjd_tdb and expected_kp_kms are required")
+        if not 0.0 <= self.system.eccentricity < 1.0:
+            raise ValueError("system eccentricity must be in [0, 1)")
         if not self.atmosphere.species:
             raise ValueError("at least one atmosphere species is required")
         if (self.atmosphere.resolving_power is not None
@@ -199,8 +228,21 @@ class HRCCSConfig:
             raise ValueError("svd_components must be unique non-negative integers")
         if not 0.0 < self.reduction.telluric_threshold <= 1.0:
             raise ValueError("telluric_threshold must be in (0, 1]")
-        if self.reduction.telluric_mask_scope not in {"all", "in_transit"}:
-            raise ValueError("telluric_mask_scope must be 'all' or 'in_transit'")
+        if self.reduction.telluric_mask_scope not in {
+            "all", "signal", "event", "out_of_event", "in_transit"
+        }:
+            raise ValueError(
+                "telluric_mask_scope must be all, signal, event, out_of_event, "
+                "or the transit-only alias in_transit"
+            )
+        if (self.reduction.telluric_mask_scope == "in_transit"
+                and self.system.observation_type == "eclipse"):
+            raise ValueError(
+                "telluric_mask_scope 'in_transit' is a transit-only alias and "
+                "would select out-of-eclipse exposures here; use 'signal' for "
+                "the exposures being cross-correlated, or name the geometry "
+                "with 'event' / 'out_of_event'"
+            )
         if self.reduction.edge_trim_pixels < 0:
             raise ValueError("edge_trim_pixels must be non-negative")
         if self.reduction.ccf_lsf_margin_widths < 0:
@@ -213,6 +255,8 @@ class HRCCSConfig:
             raise ValueError("local component-selection half widths must be non-negative")
         if self.injection.null_realizations < 1:
             raise ValueError("injection null_realizations must be at least one")
+        if self.injection.scale <= 0:
+            raise ValueError("injection scale must be positive")
 
     def grids(self, stellar_rv_kms: float):
         import numpy as np

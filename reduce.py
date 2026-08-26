@@ -13,7 +13,9 @@ Example:
 
 Physical wavecal is enabled by default. Automatic mode selection uses
 hybrid_refit for HIRES-Y/J and hybrid_static for WIDE. ``--no-wavecal`` gives
-a WARP-only product.
+a WARP-only product. The default physical calibration is one pass over a
++/-25 km/s telluric search. ``--alignment atmospheric`` explicitly enables
+the pooled atmospheric registration followed by a second physical solve.
 """
 
 from __future__ import annotations
@@ -76,7 +78,8 @@ def main() -> None:
     parser.add_argument(
         "--alignment", choices=("warp", "atmospheric", "none"), default="warp",
         help=("cross-frame alignment before physical wavecal: warp (default), "
-              "atmospheric (broad pooled telluric/OH CCF + fine wavecal), or none"),
+              "atmospheric (explicit two-pass pooled telluric/OH CCF + fine "
+              "wavecal), or none; non-atmospheric wavecal uses one +/-25 km/s pass"),
     )
     parser.add_argument(
         "--serval-rv", action="store_true",
@@ -88,7 +91,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--serval-ephemeris", type=Path,
-        help="TOML file whose [system] table defines period, transit midpoint, and duration",
+        help=("TOML file whose [system] table defines observation_type, period, "
+              "event midpoint, and duration"),
     )
     parser.add_argument(
         "--serval-telluric-threshold", type=float, default=0.90,
@@ -107,7 +111,7 @@ def main() -> None:
     if args.no_wavecal and args.serval_rv:
         parser.error("--serval-rv requires physical wavecal")
     if args.serval_rv and args.serval_ephemeris is None:
-        parser.error("--serval-rv requires --serval-ephemeris to exclude the transit")
+        parser.error("--serval-rv requires --serval-ephemeris to exclude the event")
     if not 0.0 < args.serval_telluric_threshold <= 1.0:
         parser.error("--serval-telluric-threshold must be in (0, 1]")
     if args.out.exists() and any(args.out.iterdir()) and not args.overwrite:

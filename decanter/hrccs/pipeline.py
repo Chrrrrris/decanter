@@ -27,16 +27,22 @@ def _json_ready(value):
     return value
 
 
-def _mask(cube, config, rv_grid, in_transit, resolving_power):
+def _mask(cube, config, rv_grid, event_mask, signal_mask, resolving_power):
     n_orders, n_pixels = cube.wavelength_um.shape
     keep = np.ones((n_orders, n_pixels), dtype=bool)
     if cube.telluric_transmission is None:
         warnings.warn("telluric_transmission.npz is absent; no telluric pixels are masked",
                       RuntimeWarning, stacklevel=2)
     else:
-        rows = (np.asarray(in_transit, dtype=bool)
-                if config.telluric_mask_scope == "in_transit"
-                else np.ones(cube.flux.shape[0], dtype=bool))
+        scope = config.telluric_mask_scope
+        if scope in {"signal", "in_transit"}:
+            rows = np.asarray(signal_mask, dtype=bool)
+        elif scope == "event":
+            rows = np.asarray(event_mask, dtype=bool)
+        elif scope == "out_of_event":
+            rows = ~np.asarray(event_mask, dtype=bool)
+        else:
+            rows = np.ones(cube.flux.shape[0], dtype=bool)
         transmission = cube.telluric_transmission[rows]
         finite = np.isfinite(transmission)
         minimum = np.min(np.where(finite, transmission, np.inf), axis=0)
@@ -86,7 +92,8 @@ def run(config):
     rv_grid, kp_grid, vsys_grid = config.grids(orbit.stellar_rv_kms)
     resolving_power = config.atmosphere.resolving_power_for(cube.instmode)
     mask = _mask(
-        cube, config.reduction, rv_grid, orbit.in_transit, resolving_power
+        cube, config.reduction, rv_grid, orbit.event_mask, orbit.signal_mask,
+        resolving_power,
     )
     retained = np.sum(mask, axis=1) >= config.reduction.min_valid_pixels
     wavelength = cube.wavelength_um[retained]
@@ -116,11 +123,16 @@ def run(config):
             if not np.array_equal(template.wavelength_um, wave):
                 raise RuntimeError("template is not sampled on its order wavelength grid")
         depths = np.asarray([template.transit_depth for template in templates])
-        raw_template = -depths
-        wide_signal = -wide_template.transit_depth
+        # ExoJAX currently builds the same inexpensive isothermal transmission
+        # spectrum for both observing geometries. Flip its line contrast for a
+        # species-presence emission test; no detailed dayside P-T profile is
+        # implied by this proxy.
+        template_sign = 1.0 if config.system.observation_type == "eclipse" else -1.0
+        raw_template = template_sign * depths
+        wide_signal = template_sign * wide_template.transit_depth
         result = run_species(
             species, prepared, wavelength, raw_template, mask, orbit.phase, orbit.berv_kms,
-            orbit.transit_weight, rv_grid, kp_grid, vsys_grid,
+            orbit.signal_weight, rv_grid, kp_grid, vsys_grid,
             config.system.expected_kp_kms, orbit.stellar_rv_kms,
             config.reduction.svd_components, config.search.map_sigma_clip,
             config.search.local_kp_half_width_kms,
@@ -129,14 +141,24 @@ def run(config):
             config.injection.null_realizations,
             wide_wavelength_um=wide_template.wavelength_um,
             wide_template=wide_signal,
+            velocity_sign=orbit.velocity_sign,
+            velocity_basis=orbit.velocity_basis,
+            # A transit's star-only reference is OOT; an eclipse's star-only
+            # reference is the in-eclipse spectrum with the planet hidden.
+            baseline_mask=(orbit.event_mask if config.system.observation_type == "eclipse"
+                           else ~orbit.event_mask),
             show_progress=config.show_progress,
         )
         results.append(result)
         _save_result(result, output, orbit, rv_grid, kp_grid, vsys_grid)
         if config.plots.enabled:
             from decanter.hrccs import plots
-            plots.forward_spectrum(species, wavelength, depths, output,
-                                   config.plots.formats, config.plots.dpi)
+            plots.forward_spectrum(
+                species, wavelength, template_sign * depths, output,
+                config.plots.formats, config.plots.dpi,
+                observation_type=config.system.observation_type,
+                injection_scale=config.injection.scale,
+            )
             plots.svd_sequence(result, prepared, wavelength, orders, orbit.phase, output,
                                config.plots.orders_per_page)
             plots.template_sequence(result, wavelength, orders, orbit.phase, output,
@@ -153,6 +175,18 @@ def run(config):
         "analysis_method": "notebook_exact_svd_refit",
         "berv_kms": [float(np.nanmin(orbit.berv_kms)), float(np.nanmax(orbit.berv_kms))],
         "stellar_rv_kms": orbit.stellar_rv_kms,
+        "observation_type": config.system.observation_type,
+        "signal_exposures": ("out_of_eclipse" if config.system.observation_type == "eclipse"
+                             else "in_transit"),
+        "injection_stellar_baseline_exposures": (
+            "in_eclipse" if config.system.observation_type == "eclipse"
+            else "out_of_transit"
+        ),
+        "template_interpretation": (
+            "inverted isothermal transmission proxy for emission species presence"
+            if config.system.observation_type == "eclipse"
+            else "isothermal transmission"
+        ),
         "component_selection": {
             "criterion": "maximum map S/N within the local expected-planet window",
             "kp_half_width_kms": config.search.local_kp_half_width_kms,

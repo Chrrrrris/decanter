@@ -150,7 +150,7 @@ def measure_series_shifts(
     supports: NDArray,
     dv_pix_kms: NDArray,
     *,
-    search_kms: float = 12.0,
+    search_kms: float = 25.0,
     step_kms: float = 0.05,
     center_kms: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:

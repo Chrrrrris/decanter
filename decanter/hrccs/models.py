@@ -399,12 +399,38 @@ class TemplateFactory:
         return self._cia_databases[filename]
 
     def _key(self, species, wave):
+        # Orbital geometry, coordinates, and event timing do not affect an
+        # atmospheric spectrum. Restrict the cache key to the system values
+        # actually consumed by the forward model so changing an eclipse
+        # ephemeris or adding e/omega reuses the same expensive opacity model.
+        system = {
+            name: getattr(self.system, name)
+            for name in (
+                "stellar_radius_rsun", "planet_radius_rjup", "planet_mass_mjup",
+                "equilibrium_temperature_k", "metallicity_dex",
+            )
+        }
+        payload = {
+            "schema": 5, "species": species, "instmode": self.instmode,
+            "wave": [round(float(wave[0]), 8), round(float(wave[-1]), 8), len(wave)],
+            "system": system, "atmosphere": vars(self.config),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:20]
+
+    def _legacy_path(self, species, wave):
+        """Schema-4 path from before orbital fields were separated."""
+        system = dict(vars(self.system))
+        system.pop("eccentricity", None)
+        system.pop("argument_of_periastron_deg", None)
         payload = {
             "schema": 4, "species": species, "instmode": self.instmode,
             "wave": [round(float(wave[0]), 8), round(float(wave[-1]), 8), len(wave)],
-            "system": vars(self.system), "atmosphere": vars(self.config),
+            "system": system, "atmosphere": vars(self.config),
         }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:20]
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode()
+        ).hexdigest()[:20]
+        return self.cache / "templates" / f"{species.replace('+', 'p')}_{digest}.npz"
 
     def _path(self, species, wave):
         return (self.cache / "templates"
@@ -454,11 +480,12 @@ class TemplateFactory:
             order_wavelengths, float(self.config.resolving_power), samples_per_fwhm=5.0,
         )
         path = self._path(species, wave)
-        if path.exists():
-            cached = self._load(path, species)
-            if (np.all(np.isfinite(cached.contrast))
-                    and np.ptp(cached.contrast) > 0.0):
-                return cached
+        for candidate in (path, self._legacy_path(species, wave)):
+            if candidate.exists():
+                cached = self._load(candidate, species)
+                if (np.all(np.isfinite(cached.contrast))
+                        and np.ptp(cached.contrast) > 0.0):
+                    return cached
         chunk_points = int(
             self.config.atomic_wide_model_chunk_points if _is_atomic(species)
             else self.config.wide_model_chunk_points
@@ -533,8 +560,9 @@ class TemplateFactory:
         """Build/cache a model directly on one requested grid."""
         wave = np.asarray(wavelength_um, dtype=float)
         path = self._path(species, wave)
-        if path.exists():
-            return self._load(path, species)
+        for candidate in (path, self._legacy_path(species, wave)):
+            if candidate.exists():
+                return self._load(candidate, species)
         template = self._compute(species, wave)
         self._save(path, template)
         return template

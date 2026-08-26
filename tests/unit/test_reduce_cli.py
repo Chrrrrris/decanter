@@ -54,6 +54,7 @@ def test_cli_runs_wavecal_and_optional_report_by_default(monkeypatch, tmp_path) 
     assert captured["workdir"] == output
     assert captured["wavecal_config"].mode == "hybrid_refit"
     assert captured["wavecal_config"].atmospheric_prealign is False
+    assert captured["wavecal_config"].shift_search_kms == 25.0
     assert captured["wavecal_diagnostic_pdf"] == output / "wavecal_diagnostics.pdf"
 
 
@@ -89,3 +90,4 @@ def test_cli_atmospheric_alignment_skips_warp_and_enables_two_pass_wavecal(
 
     assert captured["align"] is False
     assert captured["wavecal_config"].atmospheric_prealign is True
+    assert captured["wavecal_config"].shift_search_kms == 25.0

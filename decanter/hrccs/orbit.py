@@ -1,4 +1,4 @@
-"""Target metadata, barycentric correction, and transit coordinates."""
+"""Target metadata, barycentric correction, and transit/eclipse coordinates."""
 
 from __future__ import annotations
 
@@ -17,9 +17,23 @@ class Orbit:
     stellar_rv_kms: float
     bjd_tdb: np.ndarray
     phase: np.ndarray
-    in_transit: np.ndarray
-    transit_weight: np.ndarray
+    event_mask: np.ndarray
+    signal_mask: np.ndarray
+    signal_weight: np.ndarray
+    velocity_basis: np.ndarray
+    velocity_sign: float
+    observation_type: str
     berv_kms: np.ndarray
+
+    @property
+    def in_transit(self) -> np.ndarray:
+        """Backward-compatible alias; prefer ``event_mask``."""
+        return self.event_mask
+
+    @property
+    def transit_weight(self) -> np.ndarray:
+        """Backward-compatible alias; prefer ``signal_weight``."""
+        return self.signal_weight
 
 
 def _target_name(config, metadata) -> str:
@@ -64,6 +78,49 @@ def _simbad(name: str, cache_dir: Path) -> tuple[float, float, float]:
     return coord.ra.deg, coord.dec.deg, rv
 
 
+def _true_anomaly(mean_anomaly: np.ndarray, eccentricity: float) -> np.ndarray:
+    """Solve Kepler's equation and return true anomaly in radians."""
+    mean = np.asarray(mean_anomaly, dtype=float)
+    eccentric = mean.copy()
+    for _ in range(20):
+        correction = ((eccentric - eccentricity * np.sin(eccentric) - mean)
+                      / (1.0 - eccentricity * np.cos(eccentric)))
+        eccentric -= correction
+        if np.nanmax(np.abs(correction)) < 1.0e-13:
+            break
+    return 2.0 * np.arctan2(
+        np.sqrt(1.0 + eccentricity) * np.sin(0.5 * eccentric),
+        np.sqrt(1.0 - eccentricity) * np.cos(0.5 * eccentric),
+    )
+
+
+def _orbital_velocity_basis(phase: np.ndarray, observation_type: str,
+                            eccentricity: float = 0.0,
+                            argument_of_periastron_deg: float = 90.0) -> np.ndarray:
+    """Dimensionless planet RV divided by Kp, anchored at the event midpoint.
+
+    The sign follows the HRCCS convention ``+sin(2 pi phase)`` about transit.
+    For an eccentric orbit this is ``-[cos(f + omega) + e cos(omega)]``.
+    Infer mean anomaly at the supplied transit/eclipse midpoint using the
+    edge-on conjunction approximation.
+    """
+    phase = np.asarray(phase, dtype=float)
+    sign = -1.0 if observation_type == "eclipse" else 1.0
+    if eccentricity == 0.0:
+        return sign * np.sin(2.0 * np.pi * phase)
+    omega = np.deg2rad(argument_of_periastron_deg)
+    conjunction_longitude = 1.5 * np.pi if observation_type == "eclipse" else 0.5 * np.pi
+    true_at_event = conjunction_longitude - omega
+    eccentric_at_event = 2.0 * np.arctan2(
+        np.sqrt(1.0 - eccentricity) * np.sin(0.5 * true_at_event),
+        np.sqrt(1.0 + eccentricity) * np.cos(0.5 * true_at_event),
+    )
+    mean_at_event = eccentric_at_event - eccentricity * np.sin(eccentric_at_event)
+    mean = mean_at_event + 2.0 * np.pi * phase
+    true = _true_anomaly(mean, eccentricity)
+    return -(np.cos(true + omega) + eccentricity * np.cos(omega))
+
+
 def build_orbit(system, time_jd_utc, metadata, cache_dir: str | Path) -> Orbit:
     from astropy import units as u
     from astropy.coordinates import EarthLocation, SkyCoord
@@ -90,11 +147,21 @@ def build_orbit(system, time_jd_utc, metadata, cache_dir: str | Path) -> Orbit:
     light_time = utc.light_travel_time(target, kind="barycentric")
     bjd = np.asarray((utc.tdb + light_time).jd, dtype=float)
     berv = target.radial_velocity_correction("barycentric", obstime=utc).to_value(u.km / u.s)
-    phase = ((bjd - system.transit_midpoint_bjd_tdb + 0.5 * system.period_days)
+    phase = ((bjd - system.event_midpoint + 0.5 * system.period_days)
              % system.period_days) / system.period_days - 0.5
-    half = 0.5 * system.transit_duration_hours / 24.0 / system.period_days
-    in_transit = np.abs(phase) <= half
-    # Box transit by default; retained as an explicit array for future limb/ingress weights.
-    weight = in_transit.astype(float)
+    half = 0.5 * system.event_duration / 24.0 / system.period_days
+    event_mask = np.abs(phase) <= half
+    # Transmission exists in transit; dayside emission is visible out of
+    # eclipse. Around secondary eclipse the planet RV has the opposite slope
+    # to the transit-centered sine convention.
+    is_eclipse = system.observation_type == "eclipse"
+    signal_mask = ~event_mask if is_eclipse else event_mask
+    weight = signal_mask.astype(float)
+    velocity_sign = -1.0 if is_eclipse else 1.0
+    velocity_basis = _orbital_velocity_basis(
+        phase, system.observation_type, system.eccentricity,
+        system.argument_of_periastron_deg,
+    )
     return Orbit(name, float(ra), float(dec), float(stellar_rv), bjd, phase,
-                 in_transit, weight, np.asarray(berv, dtype=float))
+                 event_mask, signal_mask, weight, velocity_basis, velocity_sign,
+                 system.observation_type, np.asarray(berv, dtype=float))

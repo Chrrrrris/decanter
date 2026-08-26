@@ -21,13 +21,22 @@ def _save(fig, stem: Path, formats, dpi):
     plt.close(fig)
 
 
-def forward_spectrum(species, wavelength_um, depths, output, formats, dpi):
+def forward_spectrum(species, wavelength_um, depths, output, formats, dpi,
+                     observation_type="transit", injection_scale=1.0):
     _style()
     fig, axis = plt.subplots(figsize=(12, 4), constrained_layout=True)
     for wave, depth in zip(wavelength_um, depths):
-        axis.plot(wave, depth, color="#2a6fbb", lw=0.8)
-    axis.set(xlabel=r"Vacuum wavelength ($\mu$m)", ylabel=r"$(R_p/R_\star)^2$",
-             title=f"{species} isothermal equilibrium transmission spectrum")
+        displayed = depth * injection_scale if observation_type == "eclipse" else depth
+        axis.plot(wave, displayed, color="#2a6fbb", lw=0.8)
+    if observation_type == "eclipse":
+        ylabel = (rf"{injection_scale:g}$\times$ inverted "
+                  r"$(R_p/R_\star)^2$ proxy")
+        title = (f"{species} emission species-presence proxy "
+                 f"(synthetic injection: {injection_scale:g}x)")
+    else:
+        ylabel = r"$(R_p/R_\star)^2$"
+        title = f"{species} isothermal equilibrium transmission spectrum"
+    axis.set(xlabel=r"Vacuum wavelength ($\mu$m)", ylabel=ylabel, title=title)
     _save(fig, Path(output) / f"{species}_forward_spectrum", formats, dpi)
 
 
@@ -104,36 +113,46 @@ def component_snr(result, output, formats, dpi):
 def final_four_panel(result, orbit, rv_grid, kp_grid, vsys_grid, expected_kp,
                      expected_vsys, output, formats, dpi):
     fig, axes = plt.subplots(1, 4, figsize=(21, 4.8), constrained_layout=True)
-    use = orbit.in_transit
-    expected_velocity = (expected_kp * np.sin(2 * np.pi * orbit.phase[use])
-                         + expected_vsys - orbit.berv_kms[use])
+    # Keep the event rows in the mesh as NaNs. Removing them caused
+    # pcolormesh to bridge the phase gap and paint out-of-eclipse CCF rows
+    # across the eclipse, producing a misleading rectangular trail feature.
+    expected_velocity = (expected_kp * orbit.velocity_basis
+                         + expected_vsys - orbit.berv_kms)
     velocity = expected_velocity[:, None] + rv_grid[None, :]
-    trail = axes[0].pcolormesh(velocity, orbit.phase[use, None] * np.ones_like(velocity),
-                               result.selected.exposure_ccf[use], shading="auto",
+    displayed_ccf = np.where(
+        orbit.signal_mask[:, None], result.selected.exposure_ccf, np.nan
+    )
+    trail = axes[0].pcolormesh(velocity, orbit.phase[:, None] * np.ones_like(velocity),
+                               displayed_ccf, shading="auto",
                                cmap="RdBu_r", rasterized=True)
-    axes[0].plot(expected_velocity, orbit.phase[use], color="k", lw=1.4,
+    displayed_velocity = np.where(orbit.signal_mask, expected_velocity, np.nan)
+    axes[0].plot(displayed_velocity, orbit.phase, color="k", lw=1.4,
                  label="expected trail")
     axes[0].set(xlabel=r"Observer-frame planet velocity (km s$^{-1}$)",
-                ylabel="Orbital phase", title="Planet trail")
+                ylabel=f"Phase from {orbit.observation_type}", title="Planet trail")
     axes[0].legend(frameon=False, fontsize=8)
     fig.colorbar(trail, ax=axes[0], label="CCF")
 
-    panels = ((result.selected.snr_map, "Observed"),
-              (result.injected.snr_map, "Injection recovery"),
-              (result.null_mean_map, f"Mean of {result.null_snr_at_expected.size} nulls"))
-    for axis, (values, label) in zip(axes[1:], panels):
+    # The observed and injected panels carry their own summary, so the two
+    # numbers the panel is read for -- the value at the expected location and
+    # the value at the nearby maximum actually found -- sit on the markers
+    # rather than only in the title. The null mean has no such pair.
+    panels = ((result.selected.snr_map, "Observed", result.selected),
+              (result.injected.snr_map, "Injection recovery", result.injected),
+              (result.null_mean_map,
+               f"Mean of {result.null_snr_at_expected.size} nulls", None))
+    for axis, (values, label, summary) in zip(axes[1:], panels):
         image = axis.pcolormesh(vsys_grid, kp_grid, values, shading="auto",
                                 cmap="RdBu_r", rasterized=True)
+        expected_label = "expected"
+        if summary is not None:
+            expected_label += f" (S/N = {summary.expected_snr:+.2f})"
         axis.plot(expected_vsys, expected_kp, "+", color="k", ms=13, mew=2,
-                  label="expected")
-        if label == "Observed":
-            axis.plot(result.selected.local_peak_vsys_kms,
-                      result.selected.local_peak_kp_kms, "o", mfc="none",
-                      mec="k", ms=8, label="local maximum")
-        elif label == "Injection recovery":
-            axis.plot(result.injected.local_peak_vsys_kms,
-                      result.injected.local_peak_kp_kms, "o", mfc="none",
-                      mec="k", ms=8, label="local maximum")
+                  label=expected_label)
+        if summary is not None:
+            axis.plot(summary.local_peak_vsys_kms, summary.local_peak_kp_kms,
+                      "o", mfc="none", mec="k", ms=8,
+                      label=f"local maximum (S/N = {summary.local_peak_snr:+.2f})")
         axis.set(xlabel=r"$V_{sys}$ (km s$^{-1}$)", ylabel=r"$K_p$ (km s$^{-1}$)",
                  title=label)
         axis.legend(frameon=False, fontsize=8)

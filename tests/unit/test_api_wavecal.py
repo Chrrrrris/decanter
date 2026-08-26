@@ -124,9 +124,11 @@ def test_atmospheric_prealign_runs_coarse_then_fine_physical_solve(monkeypatch) 
     series = TransitSeries(reductions=reductions, shifts=np.zeros(2), refid=0)
     solve_module = importlib.import_module("decanter.wavecal.solve")
     calls = []
+    solve_configs = []
 
     def fake_solve(reference, config, *, verbose, return_diagnostics):
         calls.append(reference)
+        solve_configs.append(config)
         shape = (reference.n_frames, reference.n_orders)
         if len(calls) == 1:
             velocity = np.array([
@@ -171,6 +173,8 @@ def test_atmospheric_prealign_runs_coarse_then_fine_physical_solve(monkeypatch) 
     )
 
     assert len(calls) == 2
+    assert all(config.shift_search_kms == 25.0 for config in solve_configs)
+    assert all(config.atmospheric_prealign is True for config in solve_configs)
     solution = corrected.wavecal_solution
     assert solution is not None
     assert solution.meta["atmospheric_prealign"] is True
@@ -180,6 +184,36 @@ def test_atmospheric_prealign_runs_coarse_then_fine_physical_solve(monkeypatch) 
     # The exact relativistic composition is very close to coarse + 0.2 km/s.
     np.testing.assert_allclose(solution.velocity[:, 0], [-0.8, 1.2], atol=1e-5)
     np.testing.assert_array_equal(corrected.shifts, np.zeros(2))
+
+
+def test_default_wavecal_is_one_wide_pass(monkeypatch) -> None:
+    reductions = [_reduction("WINA00000001", 1), _reduction("WINA00000002", 2)]
+    series = TransitSeries(reductions=reductions, shifts=np.zeros(2), refid=0)
+    solve_module = importlib.import_module("decanter.wavecal.solve")
+    calls = []
+
+    def fake_solve(reference, config, *, verbose, return_diagnostics):
+        calls.append(config)
+        shape = (reference.n_frames, reference.n_orders)
+        solution = decanter.WavecalSolution(
+            frame_ids=reference.frame_ids,
+            orders=reference.orders,
+            velocity=np.zeros(shape),
+            source=np.full(shape, "telluric", dtype="U16"),
+            bracketed=np.ones(shape, dtype=bool),
+            mode=config.mode,
+        )
+        return SimpleNamespace(solution=solution, telluric_model=None)
+
+    monkeypatch.setattr(solve_module, "solve", fake_solve)
+    corrected = decanter.calibrate_wavelengths(
+        series, decanter.WavecalConfig(), verbose=False,
+    )
+
+    assert corrected.wavecal_solution is not None
+    assert len(calls) == 1
+    assert calls[0].shift_search_kms == 25.0
+    assert calls[0].atmospheric_prealign is False
 
 
 def test_atmospheric_common_solution_measures_broad_pooled_ccf(monkeypatch) -> None:
