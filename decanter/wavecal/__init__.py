@@ -33,7 +33,7 @@ on a grid linear in wavelength, dividing ``CRVAL1`` and ``CDELT1`` by
 from decanter.wavecal.config import WavecalConfig
 from decanter.wavecal.directory import apply_solution_to_directory
 from decanter.wavecal.report import wavecal_report_pdf
-from decanter.wavecal.products import telluric_product
+from decanter.wavecal.products import airglow_product, telluric_product
 from decanter.wavecal.series import Series, from_reductions, load_series
 from decanter.wavecal.solution import C_KMS, WavecalSolution
 from decanter.wavecal.solve import WavecalRun, solve
@@ -49,5 +49,6 @@ __all__ = [
     "load_series",
     "solve",
     "wavecal_report_pdf",
+    "airglow_product",
     "telluric_product",
 ]

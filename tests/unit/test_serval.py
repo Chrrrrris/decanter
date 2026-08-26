@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,10 +13,12 @@ import pytest
 from decanter.serval import (
     TransitEphemeris,
     _adapter_text,
+    _gnuplot_environment,
     _match_serval_rows,
     _retain_usable_orders,
     _telluric_mask,
     _transit_selection,
+    _binning_curve,
     _two_bins,
     robust_scatter,
     run_serval_rv_stability,
@@ -123,6 +128,31 @@ def test_serval_adapter_uses_all_orders_and_nominal_resolution() -> None:
     assert 'pmax = 2386' in text
 
 
+def test_headless_gnuplot_shim_exits_with_open_stdin(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("decanter.serval.shutil.which", lambda *args, **kwargs: None)
+    environment = {"PATH": ""}
+    _gnuplot_environment(environment, tmp_path)
+    process = subprocess.Popen(
+        [str(tmp_path / "bin" / "gnuplot"), "-e", "plot NaN"],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        assert process.wait(timeout=1.0) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+    persistent = subprocess.Popen(
+        [str(tmp_path / "bin" / "gnuplot")], stdin=subprocess.PIPE,
+    )
+    assert persistent.stdin is not None
+    persistent.stdin.write(b"reset\n")
+    persistent.stdin.flush()
+    assert persistent.poll() is None
+    persistent.stdin.close()
+    assert persistent.wait(timeout=1.0) == 0
+
+
 def test_orders_without_enough_unmasked_interior_are_excluded() -> None:
     n_pixels = 600
     series = Series(
@@ -153,3 +183,133 @@ def test_serval_step_requires_physical_wavecal(tmp_path) -> None:
             tmp_path,
             ephemeris=TransitEphemeris(1.0, 2_460_000.0, 2.0),
         )
+
+
+def test_binning_curve_follows_root_n_for_white_noise() -> None:
+    generator = np.random.default_rng(11)
+    n = 240
+    time = 2460000.0 + np.arange(n) / 288.0
+    residual = generator.normal(0.0, 40.0, n)
+    error = np.full(n, 40.0)
+
+    size, rms, rms_error, n_bins, white = _binning_curve(time, residual, error)
+
+    assert size[0] == 1
+    np.testing.assert_allclose(rms[0], np.std(residual, ddof=1))
+    np.testing.assert_allclose(white, rms[0] / np.sqrt(size))
+    assert np.all(n_bins >= 4)
+    # A binned RMS carries its own scatter of 1/sqrt(2(M-1)), so the tail of
+    # the curve wanders by tens of percent however white the data is. Where
+    # the bins are numerous the curve sits on the sqrt(N) line.
+    ratio = rms / white
+    well_sampled = n_bins >= 20
+    assert 0.94 < float(np.median(ratio[well_sampled])) < 1.06
+    assert np.all(np.abs(rms - white) < 6.0 * rms_error + 1e-9)
+
+
+def test_binning_curve_does_not_integrate_down_a_drift() -> None:
+    n = 120
+    time = 2460000.0 + np.arange(n) / 288.0
+    # A slow ramp is entirely correlated between neighbours, so bin averages
+    # still trace it and the scatter barely moves.
+    residual = np.linspace(-200.0, 200.0, n)
+    error = np.full(n, 10.0)
+
+    size, rms, _, _, white = _binning_curve(time, residual, error)
+
+    assert rms[-1] > 0.9 * rms[0]
+    assert rms[-1] / white[-1] > 0.8 * np.sqrt(size[-1])
+
+
+def test_binning_curve_does_not_average_across_the_transit() -> None:
+    time = 2460000.0 + np.arange(16) / 288.0
+    window = np.array([time[7] + 1e-4, time[8] - 1e-4])
+    # Each side sits at its own level, so a bin spanning the gap would average
+    # the two together and make the step look like it had integrated down.
+    residual = np.where(np.arange(16) < 8, -100.0, 100.0)
+    error = np.full(16, 5.0)
+
+    size, split, _, split_bins, _ = _binning_curve(time, residual, error, window)
+    _, _, _, merged_bins, _ = _binning_curve(time, residual, error)
+
+    # Eight exposures either side: bins of three leave two per side and a
+    # discarded remainder, where binning straight through the gap would fit a
+    # fifth bin across it.
+    at_three = int(np.flatnonzero(size == 3)[0])
+    assert split_bins[at_three] == 4
+    assert merged_bins[at_three] == 5
+    # No bin mixes the two levels, so the step never integrates down.
+    assert np.all(split >= 100.0)
+
+
+def test_binning_curve_declines_with_too_few_exposures() -> None:
+    time = 2460000.0 + np.arange(3) / 288.0
+    size, rms, rms_error, n_bins, white = _binning_curve(
+        time, np.zeros(3), np.ones(3)
+    )
+    assert size.size == 0 and rms.size == 0 and white.size == 0
+
+
+def _oh_run(series: Series) -> SimpleNamespace:
+    """A wavecal run whose OH fit flags one line in the first order."""
+    support = np.zeros((series.n_pixels, series.n_orders), dtype=bool)
+    support[6, 0] = True
+    return SimpleNamespace(
+        series=series,
+        solution=SimpleNamespace(mode="hybrid_refit"),
+        oh_model=SimpleNamespace(
+            support=support,
+            line_count=np.asarray([1, 0]),
+            rotational_temperature_k=190.0,
+        ),
+    )
+
+
+def test_oh_mask_from_a_live_run_and_from_the_product_agree(tmp_path) -> None:
+    """A reduction read back from disk must mask the same airglow pixels.
+
+    Without the product the directory entry point masked no OH at all, which
+    is a silent 30% loss of RV stability rather than an error.
+    """
+    from decanter.serval import _oh_mask
+    from decanter.wavecal.products import airglow_product
+
+    series = _series()
+    run = _oh_run(series)
+    product = airglow_product(run, tmp_path / "oh_support.npz")
+
+    live = _oh_mask(run, series)
+    from_disk = _oh_mask(None, series, product)
+
+    assert np.any(live[0])
+    assert not np.any(live[1])
+    np.testing.assert_array_equal(live, from_disk)
+
+
+def test_oh_mask_warns_when_no_support_is_available() -> None:
+    from decanter.serval import _oh_mask
+
+    series = _series()
+    with pytest.warns(RuntimeWarning, match="will not mask airglow"):
+        mask = _oh_mask(None, series, None)
+    assert not np.any(mask)
+
+
+def test_oh_mask_maps_orders_by_number_not_position() -> None:
+    """The product may carry orders the reduction no longer retains."""
+    from decanter.serval import _oh_mask
+    from decanter.wavecal.products import airglow_product
+    import tempfile
+
+    series = _series()
+    run = _oh_run(series)
+    with tempfile.TemporaryDirectory() as directory:
+        product = airglow_product(run, Path(directory) / "oh_support.npz")
+        trimmed = replace(series, orders=(161,), wave=series.wave[:, 1:],
+                          obj=series.obj[:, :, 1:],
+                          noise_fraction=series.noise_fraction[:, 1:],
+                          dv_pix_kms=series.dv_pix_kms[1:])
+        mask = _oh_mask(None, trimmed, product)
+    # Order 161 carried no OH lines, so dropping 160 must not shift its mask on.
+    assert mask.shape == (1, series.n_pixels)
+    assert not np.any(mask)

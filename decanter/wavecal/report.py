@@ -57,13 +57,134 @@ def _paired_centered(telluric_velocity, oh_velocity, paired):
     return tell, air
 
 
+def _pooled_ccf_pages(pdf, plt, atmospheric, series, dataset: str, page: int) -> int:
+    """Two pages on the first iteration: the pooled common-mode CCF.
+
+    The common-mode shift each exposure was pre-aligned by is the peak of one
+    pooled curve, so these pages show the curve rather than the number: where
+    the peak sits per exposure, how far it stands above its own baseline, and
+    whether the two tracers put it in the same place.
+    """
+    grid = np.asarray(atmospheric.velocity_grid_kms, dtype=float)
+    joint = np.asarray(atmospheric.joint_score, dtype=float)
+    rows = np.arange(joint.shape[0])
+    time = np.asarray(series.elapsed_hours, dtype=float)
+    peak = np.asarray(atmospheric.peak_velocity_kms, dtype=float)
+    sigma = np.asarray(atmospheric.bootstrap_sigma_kms, dtype=float)
+    telluric_peak = np.asarray(atmospheric.telluric_peak_velocity_kms, dtype=float)
+    oh_peak = np.asarray(atmospheric.oh_peak_velocity_kms, dtype=float)
+
+    panels = (
+        (atmospheric.telluric_score, telluric_peak, "Telluric pool"),
+        (atmospheric.oh_score, oh_peak, "OH pool"),
+        (joint, peak, "Joint pool"),
+    )
+    fig, axes = plt.subplots(3, 1, figsize=(11, 8.5), sharex=True,
+                             constrained_layout=True)
+    for ax, (score, peaks, label) in zip(axes, panels):
+        score = np.asarray(score, dtype=float)
+        if np.any(np.isfinite(score)):
+            image = ax.pcolormesh(grid, rows, score, shading="auto", cmap="viridis")
+            fig.colorbar(image, ax=ax, label="pooled standardised CCF")
+            ax.plot(peaks, rows, "w.", ms=3.5)
+        else:
+            ax.text(0.5, 0.5, f"no {label.lower()} contributed", ha="center",
+                    va="center", transform=ax.transAxes, fontsize=9, color=GRAY)
+        ax.set_ylabel(f"exposure\n{label}")
+    axes[-1].set_xlabel("velocity relative to each order's static offset (km/s)")
+    fig.suptitle(
+        f"Iteration 1: pooled atmospheric common-mode CCF ({dataset})", fontsize=14
+    )
+    page = _save(pdf, fig, dataset, page, "common mode", plt)
+
+    fig = plt.figure(figsize=(11, 8.5), constrained_layout=True)
+    spec = fig.add_gridspec(3, 2, width_ratios=[1.45, 1.0])
+    ax = fig.add_subplot(spec[0, 0])
+    ax.plot(time, telluric_peak, "o-", color=BLUE, ms=3.5, lw=0.9, label="telluric")
+    ax.plot(time, oh_peak, "s-", color=RED, ms=3.0, lw=0.9, label="OH")
+    ax.errorbar(time, peak, yerr=sigma, fmt="k.-", ms=4, lw=0.9,
+                label="joint (order bootstrap)")
+    ax.set_ylabel("peak velocity (km/s)")
+    ax.margins(y=0.28)
+    ax.legend(frameon=False, fontsize=7, ncols=3, loc="lower left")
+    ax.set_title("Common mode measured per exposure", fontsize=10)
+
+    ax = fig.add_subplot(spec[1, 0])
+    ax.plot(time, atmospheric.peak_snr, "o-", color="0.25", ms=3.5, lw=0.9)
+    ax.set_ylabel("peak / baseline MAD")
+    twin = ax.twinx()
+    prominence = (np.asarray(atmospheric.peak_score, dtype=float)
+                  - np.asarray(atmospheric.secondary_score, dtype=float))
+    twin.plot(time, prominence, "^--", color=GREEN, ms=3.5, lw=0.8)
+    twin.set_ylabel("peak - best rival", color=GREEN)
+    twin.tick_params(axis="y", labelcolor=GREEN)
+
+    ax = fig.add_subplot(spec[2, 0])
+    ax.plot(time, (telluric_peak - oh_peak) * 1e3, "o-", color=BLUE, ms=3.5,
+            lw=0.9, label="telluric - OH")
+    ax.plot(time, sigma * 1e3, "s-", color="0.25", ms=3.0, lw=0.9,
+            label="bootstrap 1 sigma")
+    ax.axhline(0.0, color="0.75", lw=0.8)
+    ax.set_ylabel("velocity (m/s)")
+    ax.set_xlabel("time (hours)")
+    ax.margins(y=0.28)
+    ax.legend(frameon=False, fontsize=7, ncols=2, loc="lower left")
+
+    ax = fig.add_subplot(spec[0, 1])
+    finite = np.isfinite(time)
+    span = np.ptp(time[finite]) if np.count_nonzero(finite) > 1 else 1.0
+    colors = plt.get_cmap("viridis")(
+        (time - np.nanmin(time)) / span if span > 0 else np.zeros_like(time)
+    )
+    for i in range(joint.shape[0]):
+        ax.plot(grid, joint[i], lw=0.7, color=colors[i], alpha=0.85)
+    ax.axvline(0.0, color="0.75", lw=0.8)
+    ax.set_xlabel("relative velocity (km/s)")
+    ax.set_ylabel("joint pooled CCF")
+    ax.set_title("Every exposure, coloured by time", fontsize=10)
+
+    ax = fig.add_subplot(spec[1:, 1])
+    ax.axis("off")
+    difference = telluric_peak - oh_peak
+    both = np.isfinite(difference)
+    applied = np.asarray(atmospheric.common_velocity_kms, dtype=float)
+    text = (
+        f"Search: +/-{atmospheric.search_kms:g} km/s at {atmospheric.step_kms:g} km/s\n"
+        f"Telluric orders pooled: {len(atmospheric.telluric_orders)}\n"
+        f"OH orders pooled: {len(atmospheric.oh_orders)}\n\n"
+        f"Peak / baseline MAD: median {np.nanmedian(atmospheric.peak_snr):.1f}, "
+        f"worst {np.nanmin(atmospheric.peak_snr):.1f}\n"
+        f"Peak - best rival: median {np.nanmedian(prominence):.2f}, "
+        f"worst {np.nanmin(prominence):.2f}\n"
+        f"Peak FWHM: median {np.nanmedian(atmospheric.fwhm_kms):.1f} km/s\n\n"
+        f"Order bootstrap: median {np.nanmedian(sigma) * 1e3:.0f} m/s, "
+        f"worst {np.nanmax(sigma) * 1e3:.0f} m/s\n"
+        + (f"Telluric - OH: RMS {np.sqrt(np.mean(difference[both] ** 2)) * 1e3:.0f} m/s, "
+           f"median {np.nanmedian(difference[both]) * 1e3:+.0f} m/s\n"
+           if np.any(both) else "Telluric - OH: one tracer only\n")
+        + "\nApplied common mode:\n"
+          f"  {np.ptp(applied) * 1e3:.0f} m/s peak to peak, "
+          f"{np.std(applied) * 1e3:.0f} m/s RMS\n\n"
+        "The applied shift is the joint peak with\n"
+        "the series median removed. Iteration 2\n"
+        "measures the order-dependent residual\n"
+        "left on top of it."
+    )
+    ax.text(0.0, 1.0, text, va="top", fontsize=8, linespacing=1.5)
+    fig.suptitle("Iteration 1: common-mode peak quality", fontsize=14)
+    return _save(pdf, fig, dataset, page, "common mode", plt)
+
+
 def wavecal_report_pdf(run, path: str | Path, *, dataset: str) -> Path:
     """Write one compact, one-order-per-page calibration report.
 
     The input is a :class:`~decanter.wavecal.solve.WavecalRun` returned by
-    ``solve(..., return_diagnostics=True)``. Only line-rich orders receive fit
-    pages. Orders rich in both tracers receive explicit time-series and
-    tracer-to-tracer compatibility pages.
+    ``solve(..., return_diagnostics=True)``. When the run carries an
+    :class:`~decanter.wavecal.solve.AtmosphericCommonMode`, the pooled
+    common-mode CCF of the first iteration is reported directly after the
+    overview. Only line-rich orders receive fit pages. Orders rich in both
+    tracers receive explicit time-series and tracer-to-tracer compatibility
+    pages.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -141,6 +262,14 @@ def wavecal_report_pdf(run, path: str | Path, *, dataset: str) -> Path:
         ax = axes[1, 1]
         ax.axis("off")
         overlap_cells = int(np.count_nonzero(paired & overlap_rich[None, :]))
+        prealign = getattr(run, "atmospheric", None)
+        prealign_text = (
+            "Pre-aligned by a pooled telluric+OH common mode of "
+            f"{np.std(prealign.common_velocity_kms) * 1e3:.0f} m/s RMS "
+            f"({len(prealign.telluric_orders)} telluric + {len(prealign.oh_orders)} "
+            "OH orders pooled); the solution below is the residual.\n"
+            if prealign is not None else ""
+        )
         priority_text = (
             "Priority: accepted telluric is used literally; otherwise accepted OH is "
             "used literally; all other values come from the smooth cross-order fit."
@@ -160,12 +289,17 @@ def wavecal_report_pdf(run, path: str | Path, *, dataset: str) -> Path:
             f"paired accepted cells: {overlap_cells}\n"
             f"CCF acceptance: telluric >= {config.telluric_peak_threshold:.2f}; "
             f"OH >= {config.oh_peak_threshold:.2f}\n"
-            f"Finite final solution: {_finite_percent(solution.velocity):.1f}%\n\n"
+            f"Finite final solution: {_finite_percent(solution.velocity):.1f}%\n"
+            f"{prealign_text}\n"
             f"{priority_text}"
         )
         ax.text(0.0, 1.0, text, va="top", fontsize=9, linespacing=1.45, wrap=True)
         fig.suptitle(f"Physical wavelength calibration: {config.mode}", fontsize=15)
         page = _save(pdf, fig, dataset, page, "overview", plt)
+
+        atmospheric = getattr(run, "atmospheric", None)
+        if atmospheric is not None:
+            page = _pooled_ccf_pages(pdf, plt, atmospheric, series, dataset, page)
 
         # One page per telluric-rich order, divided into four wavelength spans.
         for j in np.where(rich_t)[0]:

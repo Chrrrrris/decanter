@@ -87,6 +87,15 @@ class WavecalConfig:
         star_clean: divide out an empirical stellar template before the
             telluric fit. A no-op on featureless stars; important on cool ones.
         oh_tie: how to bring OH onto the telluric scale in absolute mode.
+        atmospheric_prealign: run a first physical solve, robustly pool its
+            broad CCF evidence from telluric-rich object orders and OH-rich
+            paired-sky orders into one time-variable shift per exposure,
+            register every order by that common mode, rebuild the atmospheric
+            templates, and run the requested fine solve again. Tellurics take
+            priority in orders rich in both references. This is the
+            physical-reference alternative to WARP WAVSHIFT.
+        atmospheric_search_kms / atmospheric_step_kms: half-width and spacing
+            of the broad common-mode CCF grid used by atmospheric prealignment.
     """
 
     mode: str = AUTO_MODE
@@ -107,6 +116,9 @@ class WavecalConfig:
     oh_rich_min_lines: int = 4
     star_clean: bool = True
     oh_tie: str = "global_constant"
+    atmospheric_prealign: bool = False
+    atmospheric_search_kms: float = 50.0
+    atmospheric_step_kms: float = 0.25
     linelist_dir: str = ""
     cache_dir: str = ""
     extra: dict = field(default_factory=dict)
@@ -127,6 +139,10 @@ class WavecalConfig:
             raise ValueError("lsf_sigma_bounds must satisfy 0 < low < high")
         if self.shift_search_kms <= 0:
             raise ValueError("shift_search_kms must be positive")
+        if self.atmospheric_search_kms <= 0:
+            raise ValueError("atmospheric_search_kms must be positive")
+        if self.atmospheric_step_kms <= 0:
+            raise ValueError("atmospheric_step_kms must be positive")
         if self.telluric_refit_closure_kms <= 0:
             raise ValueError("telluric_refit_closure_kms must be positive")
         if self.oh_shift_search_kms <= 0:

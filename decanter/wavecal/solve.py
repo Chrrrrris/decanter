@@ -38,6 +38,60 @@ from decanter.wavecal.telluric import (
 
 
 @dataclass
+class AtmosphericCommonMode:
+    """The pooled telluric+OH CCF behind the common-mode pre-alignment.
+
+    The first calibration iteration correlates every line-rich order against
+    its own template over one broad velocity grid, standardises each order's
+    CCF and averages them. The peak of that pooled curve is the common-mode
+    shift of the exposure. This holds the pooled curves and their peak
+    statistics so the report can show what the peak was measured from.
+
+    Attributes:
+        velocity_grid_kms: ``(n_grid,)`` trial velocities, relative to each
+            order's own static offset.
+        telluric_score / oh_score / joint_score: ``(n_frames, n_grid)`` pooled
+            standardised CCFs. The joint curve is what the peak is taken from;
+            the two single-tracer curves exist to be compared with each other.
+        peak_velocity_kms: ``(n_frames,)`` joint peak, before the series zero
+            point is removed.
+        telluric_peak_velocity_kms / oh_peak_velocity_kms: the same peak
+            measured from one tracer alone. Their difference is an independent
+            check on the joint value.
+        peak_snr: joint peak height over the MAD of its own curve.
+        peak_score / secondary_score / secondary_separation_kms: the peak, the
+            best maximum outside its wings, and how far away that one sits.
+        fwhm_kms: full width of the joint peak at half its height.
+        bootstrap_sigma_kms / bootstrap_p16_kms / bootstrap_p84_kms: spread of
+            the joint peak when the contributing orders are resampled.
+        common_velocity_kms: what was actually applied, i.e. the joint peak
+            with the series zero point removed.
+        telluric_orders / oh_orders: the orders each tracer contributed.
+    """
+
+    velocity_grid_kms: NDArray
+    telluric_score: NDArray
+    oh_score: NDArray
+    joint_score: NDArray
+    peak_velocity_kms: NDArray
+    telluric_peak_velocity_kms: NDArray
+    oh_peak_velocity_kms: NDArray
+    peak_snr: NDArray
+    peak_score: NDArray
+    secondary_score: NDArray
+    secondary_separation_kms: NDArray
+    fwhm_kms: NDArray
+    bootstrap_sigma_kms: NDArray
+    bootstrap_p16_kms: NDArray
+    bootstrap_p84_kms: NDArray
+    common_velocity_kms: NDArray
+    telluric_orders: tuple[int, ...] = ()
+    oh_orders: tuple[int, ...] = ()
+    search_kms: float = float("nan")
+    step_kms: float = float("nan")
+
+
+@dataclass
 class WavecalRun:
     """A solved calibration plus the measurements needed for diagnostics."""
 
@@ -58,6 +112,7 @@ class WavecalRun:
     oh_information: NDArray
     smooth_velocity: NDArray
     _telluric_tau: NDArray | None = None
+    atmospheric: AtmosphericCommonMode | None = None
 
 
 def _normalized(series) -> NDArray:

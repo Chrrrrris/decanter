@@ -66,6 +66,11 @@ class RVStabilityResult:
     exposure_mad_mps: float
     two_bin_rms_mps: float
     two_bin_mad_mps: float
+    binning_bin_size: np.ndarray
+    binning_rms_mps: np.ndarray
+    binning_rms_error_mps: np.ndarray
+    binning_n_bins: np.ndarray
+    binning_white_mps: np.ndarray
     excluded_in_transit: int
     transit_window_time_jd_utc: np.ndarray
     product_path: Path
@@ -127,6 +132,15 @@ def _dilate(mask: np.ndarray, radius: int = 3) -> np.ndarray:
                        mode="same") > 0
 
 
+#: Fitted transmission below this is masked before SERVAL sees the spectrum.
+#: Measured on TOI-3486b by scanning the whole range: too high and the mask
+#: eats the spectrum (0.5% is below the continuum noise, so 0.995 masked 80-100%
+#: of most orders and dropped 11 of 24 outright, RMS 152 m/s); too low and
+#: saturated cores bias the RVs (no masking at all gives RMS 117 m/s at 4.5x the
+#: photon error). The curve is flat from 0.80 to 0.90 and rises on both sides.
+DEFAULT_TELLURIC_THRESHOLD = 0.90
+
+
 def _telluric_mask(product: str | Path | None, series: Series,
                    threshold: float) -> np.ndarray:
     """Map the minimum fitted transmission onto SERVAL's common order grids."""
@@ -167,19 +181,40 @@ def _telluric_mask(product: str | Path | None, series: Series,
     return out
 
 
-def _oh_mask(wavecal_run, series: Series) -> np.ndarray:
-    """Map fitted OH-line support from the wavecal run onto SERVAL's grid."""
+def _oh_mask(wavecal_run, series: Series,
+             product: str | Path | None = None) -> np.ndarray:
+    """Map fitted OH-line support onto SERVAL's grid.
+
+    The support comes from the live wavecal run when there is one, and from
+    ``oh_support.npz`` when the reduction is being read back from disk. Both
+    paths must mask the same pixels: without the product a directory-based run
+    masks no airglow at all, which on TOI-3486b cost 30% in RV scatter.
+    """
     out = np.zeros((series.n_orders, series.n_pixels), dtype=bool)
-    if wavecal_run is None or wavecal_run.oh_model is None:
+    if wavecal_run is not None and wavecal_run.oh_model is not None:
+        source_orders = np.asarray(wavecal_run.series.orders, dtype=int)
+        source_wave = np.asarray(wavecal_run.series.wave, dtype=float)
+        support = np.asarray(wavecal_run.oh_model.support, dtype=bool)
+    elif product is not None and Path(product).is_file():
+        with np.load(Path(product), allow_pickle=False) as data:
+            source_orders = np.asarray(data["orders"], dtype=int)
+            source_wave = np.asarray(data["wavelength_angstrom"], dtype=float)
+            support = np.asarray(data["support"], dtype=bool)
+    else:
+        warnings.warn(
+            "no OH support available; SERVAL will not mask airglow pixels",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return out
-    source_series = wavecal_run.series
-    support = np.asarray(wavecal_run.oh_model.support, dtype=bool)
+
     for j, order in enumerate(series.orders):
-        if order not in source_series.orders:
+        matches = np.where(source_orders == order)[0]
+        if not matches.size:
             continue
-        source_order = source_series.order_index(order)
+        source_order = int(matches[0])
         mapped = np.interp(
-            series.wave[:, j], source_series.wave[:, source_order],
+            series.wave[:, j], source_wave[:, source_order],
             support[:, source_order].astype(float), left=0.0, right=0.0,
         ) > 0.25
         out[j] = _dilate(mapped)
@@ -314,6 +349,10 @@ def _gnuplot_environment(environment: dict[str, str], temporary_root: Path) -> N
     shim = binary_dir / "gnuplot"
     shim.write_text(
         '#!/bin/sh\nif [ "$1" = "-V" ]; then echo "gnuplot 5.4"; exit 0; fi\n'
+        '# The one-shot capability probe must terminate even though its parent\n'
+        '# keeps stdin open.  The no-argument process is SERVALs persistent\n'
+        '# plotting pipe, which must consume commands until SERVAL closes it.\n'
+        'if [ "$1" = "-e" ]; then exit 0; fi\n'
         'while IFS= read -r line; do :; done\n'
     )
     shim.chmod(0o755)
@@ -523,6 +562,81 @@ def _inverse_variance_mean(values, errors) -> tuple[float, float, int]:
     return float(np.mean(local)), float(error), int(local.size)
 
 
+def _binning_curve(time_jd, residual, error, excluded_window=None, *,
+                   minimum_bins: int = 4):
+    """Scatter of the RV residual after averaging every ``N`` exposures.
+
+    Averaging ``N`` independent measurements divides white noise by
+    ``sqrt(N)``. Anything correlated between exposures does not average down
+    that fast, so the curve of binned RMS against ``N`` separates the two: it
+    follows ``sigma_1 / sqrt(N)`` while the residual is white, and flattens
+    above the bin size where correlated noise takes over.
+
+    Bins are filled in time order and never span the excluded transit, so a
+    bin average is always over consecutive exposures. ``N`` counts exposures
+    rather than a fixed elapsed time. Bin sizes stop once fewer than
+    ``minimum_bins`` bins remain: the RMS of a handful of bins is itself too
+    uncertain to read.
+
+    Returns ``(bin_size, rms, rms_error, n_bins, white)``, all indexed by bin
+    size, with ``white`` the ``sqrt(N)`` expectation anchored on the measured
+    unbinned RMS. ``rms_error`` is ``rms / sqrt(2 (M - 1))`` for ``M`` bins.
+    """
+    time = np.asarray(time_jd, dtype=float)
+    value = np.asarray(residual, dtype=float)
+    uncertainty = np.asarray(error, dtype=float)
+    good = np.isfinite(time) & np.isfinite(value)
+    order = np.argsort(time[good])
+    time = time[good][order]
+    value = value[good][order]
+    uncertainty = uncertainty[good][order]
+    n_exposures = value.size
+    empty = (np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0, dtype=int),
+             np.zeros(0))
+    if n_exposures < minimum_bins:
+        return empty
+
+    blocks = [np.arange(n_exposures)]
+    if excluded_window is not None:
+        window = np.asarray(excluded_window, dtype=float)
+        before = np.where(time < window[0])[0]
+        after = np.where(time > window[1])[0]
+        if before.size and after.size:
+            blocks = [before, after]
+
+    sizes = np.arange(1, max(block.size for block in blocks) + 1)
+    rms = np.full(sizes.size, np.nan)
+    rms_error = np.full(sizes.size, np.nan)
+    n_bins = np.zeros(sizes.size, dtype=int)
+    for index, size in enumerate(sizes):
+        means = []
+        for block in blocks:
+            for start in range(0, size * (block.size // size), size):
+                inside = block[start:start + size]
+                means.append(
+                    _inverse_variance_mean(value[inside], uncertainty[inside])[0]
+                )
+        finite = np.isfinite(np.asarray(means, dtype=float))
+        n_bins[index] = int(np.count_nonzero(finite))
+        if n_bins[index] < 2:
+            continue
+        # Sample scatter. The population estimator is low by sqrt((M-1)/M),
+        # which at the four bins this curve is allowed to reach is 13% -- the
+        # same size as the departure from white the curve exists to measure.
+        rms[index] = float(np.std(np.asarray(means, dtype=float)[finite], ddof=1))
+        rms_error[index] = rms[index] / np.sqrt(2.0 * (n_bins[index] - 1))
+
+    keep = n_bins >= minimum_bins
+    if not np.any(keep):
+        return empty
+    sizes, rms, rms_error, n_bins = (
+        sizes[keep], rms[keep], rms_error[keep], n_bins[keep]
+    )
+    white = (rms[0] / np.sqrt(sizes.astype(float))
+             if np.isfinite(rms[0]) else np.full(sizes.size, np.nan))
+    return sizes, rms, rms_error, n_bins, white
+
+
 def _two_bins(time_jd, residual, error, excluded_window=None):
     good = np.isfinite(time_jd) & np.isfinite(residual)
     order = np.argsort(np.asarray(time_jd)[good])
@@ -648,8 +762,9 @@ def _retain_usable_orders(
 def _save_products(output: Path, target: str, mode: str, series: Series,
                    time_jd, bjd, berv, rv, error, residual,
                    bin_time, bin_value, bin_error, bin_count,
-                   ephemeris: TransitEphemeris, excluded_in_transit: int,
+                   binning, ephemeris: TransitEphemeris, excluded_in_transit: int,
                    transit_window_time_jd_utc: np.ndarray):
+    bin_size, binned_rms, binned_rms_error, binned_n, white = binning
     exposure_rms = float(np.nanstd(residual))
     exposure_mad = robust_scatter(residual)
     two_bin_rms = float(np.nanstd(bin_value))
@@ -662,6 +777,9 @@ def _save_products(output: Path, target: str, mode: str, series: Series,
         rv_mps=rv, rv_error_mps=error, observation_centered_rv_mps=residual,
         bin_time_jd_utc=bin_time, bin_residual_mps=bin_value,
         bin_error_mps=bin_error, bin_n_exposures=bin_count,
+        binning_bin_size=bin_size, binning_rms_mps=binned_rms,
+        binning_rms_error_mps=binned_rms_error, binning_n_bins=binned_n,
+        binning_white_mps=white,
         exposure_rms_mps=np.asarray(exposure_rms),
         exposure_mad_mps=np.asarray(exposure_mad),
         two_bin_rms_mps=np.asarray(two_bin_rms), two_bin_mad_mps=np.asarray(two_bin_mad),
@@ -696,13 +814,25 @@ def _save_products(output: Path, target: str, mode: str, series: Series,
         "exposure_rms_mps": exposure_rms,
         "exposure_mad_mps": exposure_mad, "two_bin_rms_mps": two_bin_rms,
         "two_bin_mad_mps": two_bin_mad,
+        "binning": {
+            "bin_size": [int(value) for value in bin_size],
+            "rms_mps": [float(value) for value in binned_rms],
+            "rms_error_mps": [float(value) for value in binned_rms_error],
+            "n_bins": [int(value) for value in binned_n],
+            "white_mps": [float(value) for value in white],
+            "white_ratio_at_largest_bin": (
+                float(binned_rms[-1] / white[-1])
+                if bin_size.size and np.isfinite(binned_rms[-1]) and white[-1] > 0
+                else None
+            ),
+        },
     }
     (output / "serval_rv_stability.json").write_text(json.dumps(summary, indent=2))
     return product, table_path, exposure_rms, exposure_mad, two_bin_rms, two_bin_mad
 
 
 def _plot(output: Path, target: str, mode: str, time_jd, residual, error,
-          bin_time, bin_value, bin_error, exposure_rms, exposure_mad,
+          bin_time, bin_value, bin_error, binning, exposure_rms, exposure_mad,
           two_bin_rms, two_bin_mad, transit_window_time_jd_utc,
           excluded_in_transit) -> tuple[Path, Path]:
     matplotlib_cache = Path(tempfile.gettempdir()) / "decanter_matplotlib_cache"
@@ -712,7 +842,10 @@ def _plot(output: Path, target: str, mode: str, time_jd, residual, error,
     import matplotlib.pyplot as plt
 
     color = "#2ca02c"
-    figure, axis = plt.subplots(figsize=(14, 5.2), constrained_layout=True)
+    figure, (axis, binned_axis) = plt.subplots(
+        1, 2, figsize=(17.5, 5.2), constrained_layout=True,
+        gridspec_kw={"width_ratios": [2.4, 1.0]},
+    )
     window = Time(
         np.asarray(transit_window_time_jd_utc), format="jd"
     ).to_datetime()
@@ -726,9 +859,8 @@ def _plot(output: Path, target: str, mode: str, time_jd, residual, error,
         yerr=error[good], fmt="D", linestyle="none", ms=4.7, color=color,
         alpha=0.40, elinewidth=0.5, capsize=1.2,
         label=(
-            f"SERVAL OOT — all usable orders: exp RMS={exposure_rms:.1f}, "
-            rf"MAD$\sigma$={exposure_mad:.1f}; pre/post RMS={two_bin_rms:.1f}, "
-            rf"MAD$\sigma$={two_bin_mad:.1f} m s$^{{-1}}$"
+            rf"SERVAL OOT exposures — all usable orders: RMS={exposure_rms:.1f}, "
+            rf"MAD$\sigma$={exposure_mad:.1f} m s$^{{-1}}$"
         ), zorder=2,
     )
     bin_good = np.isfinite(bin_time) & np.isfinite(bin_value)
@@ -737,6 +869,10 @@ def _plot(output: Path, target: str, mode: str, time_jd, residual, error,
         bin_value[bin_good], yerr=bin_error[bin_good], fmt="D", linestyle="none",
         ms=11, color=color, markeredgecolor="k", markeredgewidth=1.2,
         capsize=3, elinewidth=1.0, zorder=5,
+        label=(
+            rf"pre/post transit bins: RMS={two_bin_rms:.1f}, "
+            rf"MAD$\sigma$={two_bin_mad:.1f} m s$^{{-1}}$"
+        ),
     )
     axis.axhline(0, color="0.25", lw=0.7)
     axis.set_xlabel("Time (UTC)")
@@ -747,6 +883,41 @@ def _plot(output: Path, target: str, mode: str, time_jd, residual, error,
         "out-of-transit only"
     )
     axis.legend(frameon=False, fontsize=8, loc="best")
+
+    bin_size, binned_rms, binned_rms_error, binned_n, white = binning
+    usable = bin_size.size > 0 and np.any(np.isfinite(binned_rms))
+    if usable:
+        binned_axis.errorbar(
+            bin_size, binned_rms, yerr=binned_rms_error, fmt="D", ms=4.2,
+            color=color, linestyle="none", elinewidth=0.7, capsize=1.6,
+            label="binned RV residual", zorder=3,
+        )
+        binned_axis.plot(
+            bin_size, white, "k--", lw=1.2, zorder=2,
+            label=rf"white noise: {binned_rms[0]:.1f}$\,N^{{-1/2}}$",
+        )
+        binned_axis.set_xscale("log")
+        binned_axis.set_yscale("log")
+        ratio = (binned_rms[-1] / white[-1]
+                 if np.isfinite(binned_rms[-1]) and white[-1] > 0 else np.nan)
+        ratio_error = (binned_rms_error[-1] / white[-1]
+                       if np.isfinite(ratio) else np.nan)
+        binned_axis.set_title(
+            "Binned RV scatter"
+            + (rf" — {ratio:.2f}$\pm${ratio_error:.2f}x white at "
+               rf"N={int(bin_size[-1])} ({int(binned_n[-1])} bins)"
+               if np.isfinite(ratio) else "")
+        )
+        binned_axis.legend(frameon=False, fontsize=8, loc="best")
+    else:
+        binned_axis.text(
+            0.5, 0.5, "too few exposures to bin", ha="center", va="center",
+            transform=binned_axis.transAxes, fontsize=9, color="0.45",
+        )
+        binned_axis.set_title("Binned RV scatter")
+    binned_axis.set_xlabel("exposures per bin $N$")
+    binned_axis.set_ylabel("RMS of binned RV (m s$^{-1}$)")
+
     pdf = output / "serval_rv_stability.pdf"
     png = output / "serval_rv_stability.png"
     figure.savefig(pdf)
@@ -761,7 +932,7 @@ def run_serval_rv_stability(
     *,
     ephemeris: TransitEphemeris | str | Path,
     serval_root: str | Path | None = None,
-    telluric_threshold: float = 0.995,
+    telluric_threshold: float = DEFAULT_TELLURIC_THRESHOLD,
 ) -> RVStabilityResult:
     """Run SERVAL after physical wavecal on an in-memory TransitSeries."""
     if transit_series.wavecal_solution is None:
@@ -783,7 +954,7 @@ def run_serval_rv_stability_directory(
     *,
     ephemeris: TransitEphemeris | str | Path,
     serval_root: str | Path | None = None,
-    telluric_threshold: float = 0.995,
+    telluric_threshold: float = DEFAULT_TELLURIC_THRESHOLD,
 ) -> RVStabilityResult:
     """Run the same diagnostic on an already-written Decanter reduction."""
     root = Path(reduction_root).expanduser().resolve()
@@ -844,7 +1015,7 @@ def _run(series: Series, output_root: str | Path, wavecal_mode: str, *,
     product = output_root / "telluric_transmission.npz"
     telluric = _telluric_mask(product if product.is_file() else None, series,
                               telluric_threshold)
-    sky = _oh_mask(wavecal_run, series)
+    sky = _oh_mask(wavecal_run, series, output_root / "oh_support.npz")
     series, combined_mask, keep_orders = _retain_usable_orders(
         series, telluric | sky
     )
@@ -872,18 +1043,21 @@ def _run(series: Series, output_root: str | Path, wavecal_mode: str, *,
     bin_time, bin_value, bin_error, bin_count = _two_bins(
         time_jd, residual, error, transit_window_time_jd_utc
     )
+    binning = _binning_curve(
+        time_jd, residual, error, transit_window_time_jd_utc
+    )
     target = _safe_target(series)
     if target.upper() in {"UNKNOWN", "TARGET"} and target_hint:
         target = re.sub(r"[^A-Za-z0-9_.+-]+", "-", target_hint).strip("-")
     (product_path, table_path, exposure_rms, exposure_mad,
      two_bin_rms, two_bin_mad) = _save_products(
         output, target, wavecal_mode, series, time_jd, bjd, berv, rv, error, residual,
-        bin_time, bin_value, bin_error, bin_count, ephemeris,
+        bin_time, bin_value, bin_error, bin_count, binning, ephemeris,
         excluded_in_transit, transit_window_time_jd_utc,
     )
     pdf, png = _plot(
         output, target, wavecal_mode, time_jd, residual, error,
-        bin_time, bin_value, bin_error, exposure_rms, exposure_mad,
+        bin_time, bin_value, bin_error, binning, exposure_rms, exposure_mad,
         two_bin_rms, two_bin_mad, transit_window_time_jd_utc,
         excluded_in_transit,
     )
@@ -891,9 +1065,22 @@ def _run(series: Series, output_root: str | Path, wavecal_mode: str, *,
         f"SERVAL RV stability: RMS={exposure_rms:.1f} m/s, "
         f"MADsigma={exposure_mad:.1f} m/s; PDF -> {pdf}", flush=True,
     )
+    bin_size, binned_rms, binned_rms_error, binned_n, white = binning
+    # Named rather than positional: twenty-six fields of mostly same-typed
+    # arrays, where a misordered pair would be silently wrong rather than an
+    # error.
     return RVStabilityResult(
-        target, wavecal_mode, series.orders, time_jd, bjd, berv, rv, error, residual,
-        bin_time, bin_value, bin_error, exposure_rms, exposure_mad,
-        two_bin_rms, two_bin_mad, excluded_in_transit,
-        transit_window_time_jd_utc, product_path, table_path, pdf, png, log_path,
+        target=target, wavecal_mode=wavecal_mode, orders=series.orders,
+        time_jd_utc=time_jd, bjd_tdb=bjd, berv_kms=berv, rv_mps=rv,
+        rv_error_mps=error, residual_mps=residual,
+        bin_time_jd_utc=bin_time, bin_residual_mps=bin_value,
+        bin_error_mps=bin_error, exposure_rms_mps=exposure_rms,
+        exposure_mad_mps=exposure_mad, two_bin_rms_mps=two_bin_rms,
+        two_bin_mad_mps=two_bin_mad, binning_bin_size=bin_size,
+        binning_rms_mps=binned_rms, binning_rms_error_mps=binned_rms_error,
+        binning_n_bins=binned_n, binning_white_mps=white,
+        excluded_in_transit=excluded_in_transit,
+        transit_window_time_jd_utc=transit_window_time_jd_utc,
+        product_path=product_path, table_path=table_path,
+        figure_pdf=pdf, figure_png=png, log_path=log_path,
     )

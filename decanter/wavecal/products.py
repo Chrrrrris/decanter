@@ -87,3 +87,39 @@ def telluric_product(run, path: str | Path) -> Path | None:
         metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
     )
     return output
+
+
+def airglow_product(run, path: str | Path) -> Path | None:
+    """Save the fitted OH line support so a later run can rebuild the sky mask.
+
+    The support is the set of pixels around detected OH lines, which SERVAL
+    flags so airglow residuals do not enter the stellar RV. It lives on the
+    wavecal reference grid rather than per exposure, because the fit is made
+    against the time-median sky.
+
+    Without this product a reduction read back from disk has no way to know
+    where the sky lines were, and masks none of them.
+    """
+    model = run.oh_model
+    if model is None:
+        return None
+    series = run.series
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "schema": "decanter.oh-support.v1",
+        "wavelength_unit": "angstrom_vacuum",
+        "axes": "pixel,order",
+        "support_semantics": "True where a detected OH line should be masked",
+        "wavecal_mode": run.solution.mode,
+    }
+    np.savez_compressed(
+        output,
+        orders=np.asarray(series.orders, dtype=np.int32),
+        wavelength_angstrom=np.asarray(series.wave, dtype=np.float64),
+        support=np.asarray(model.support, dtype=bool),
+        line_count=np.asarray(model.line_count, dtype=np.int32),
+        rotational_temperature_k=np.asarray(model.rotational_temperature_k),
+        metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
+    )
+    return output

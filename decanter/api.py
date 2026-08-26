@@ -13,6 +13,7 @@ and can optionally layer the physical telluric/OH wavecal on its output.
 """
 from __future__ import annotations
 
+import warnings
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -504,7 +505,10 @@ class TransitSeries:
 
         The root directory also receives ``warp_alignment.npz`` and, when
         applicable, ``wavecal_solution.npz``, so the two calibration layers can
-        be inspected or reproduced independently.
+        be inspected or reproduced independently, plus
+        ``telluric_transmission.npz`` and ``oh_support.npz``. Those two carry
+        the atmosphere the wavecal fitted, which a later analysis needs to mask
+        telluric and airglow pixels without refitting it.
         """
         root = Path(workdir)
         root.mkdir(parents=True, exist_ok=True)
@@ -527,10 +531,353 @@ class TransitSeries:
         )
         if self.wavecal_solution is not None:
             self.wavecal_solution.save_npz(root / "wavecal_solution.npz")
-        if self.wavecal_run is not None and self.wavecal_run.telluric_model is not None:
-            from decanter.wavecal.products import telluric_product
+        if self.wavecal_run is not None:
+            from decanter.wavecal.products import airglow_product, telluric_product
 
-            telluric_product(self.wavecal_run, root / "telluric_transmission.npz")
+            if self.wavecal_run.telluric_model is not None:
+                telluric_product(self.wavecal_run, root / "telluric_transmission.npz")
+            if self.wavecal_run.oh_model is not None:
+                airglow_product(self.wavecal_run, root / "oh_support.npz")
+
+
+def _robust_location(values: NDArray) -> float:
+    """Median with iterative 3-MAD clipping for atmospheric anchors."""
+    values = np.asarray(values, dtype=float)
+    good = np.isfinite(values)
+    for _ in range(5):
+        kept = values[good]
+        if kept.size < 3:
+            break
+        center = float(np.median(kept))
+        sigma = float(1.4826 * np.median(np.abs(kept - center)))
+        if not np.isfinite(sigma) or sigma == 0.0:
+            break
+        updated = good & (np.abs(values - center) <= 3.0 * sigma)
+        if np.array_equal(updated, good):
+            break
+        good = updated
+    return float(np.median(values[good])) if np.any(good) else float("nan")
+
+
+def _dilated_support(support: NDArray, pixels: int) -> NDArray:
+    """Expand line support so a broad velocity search retains shifted lines."""
+    kernel = np.ones(2 * max(0, int(pixels)) + 1, dtype=int)
+    return np.convolve(np.asarray(support, dtype=bool).astype(int), kernel,
+                       mode="same") > 0
+
+
+def _correlation_bank(
+    signal: NDArray,
+    template: NDArray,
+    support: NDArray,
+    shifts_pix: NDArray,
+) -> NDArray:
+    """Pearson CCF for every exposure against one shifted order template."""
+    pixel = np.arange(template.size, dtype=float)
+    bank = np.asarray([
+        np.interp(pixel - shift, pixel, template, left=np.nan, right=np.nan)[support]
+        for shift in shifts_pix
+    ])
+    bank -= np.nanmean(bank, axis=1, keepdims=True)
+    bank = np.nan_to_num(bank, nan=0.0)
+    bank_norm = np.sqrt(np.sum(bank * bank, axis=1))
+    data = np.asarray(signal[:, support], dtype=float).copy()
+    data -= np.nanmean(data, axis=1, keepdims=True)
+    data = np.nan_to_num(data, nan=0.0)
+    data_norm = np.sqrt(np.sum(data * data, axis=1))
+    return np.divide(
+        data @ bank.T,
+        data_norm[:, None] * bank_norm[None, :],
+        out=np.full((signal.shape[0], shifts_pix.size), np.nan),
+        where=(data_norm[:, None] > 0) & (bank_norm[None, :] > 0),
+    )
+
+
+def _standardized_ccf(correlation: NDArray) -> NDArray:
+    """Put one order's CCF on its own MAD scale, clipped against outliers."""
+    center = np.nanmedian(correlation, axis=1, keepdims=True)
+    scatter = 1.4826 * np.nanmedian(
+        np.abs(correlation - center), axis=1, keepdims=True
+    )
+    standardized = np.divide(
+        correlation - center,
+        scatter,
+        out=np.full_like(correlation, np.nan),
+        where=np.isfinite(scatter) & (scatter > 0),
+    )
+    return np.clip(standardized, -8.0, 12.0)
+
+
+def _add_standardized_ccf(
+    pooled: NDArray, contribution: NDArray, correlation: NDArray,
+) -> NDArray:
+    """Pool orders without allowing a high-contrast order to dominate."""
+    standardized = _standardized_ccf(correlation)
+    finite = np.isfinite(standardized)
+    pooled += np.where(finite, standardized, 0.0)
+    contribution += finite
+    return standardized
+
+
+def _pooled_score(pooled: NDArray, contribution: NDArray) -> NDArray:
+    """Mean standardised CCF, left NaN where too few orders contributed."""
+    return np.divide(
+        pooled, contribution, out=np.full_like(pooled, np.nan),
+        where=contribution >= 2,
+    )
+
+
+def _pooled_peaks(score: NDArray, grid: NDArray, *, wing_kms: float = 20.0) -> dict:
+    """Peak velocity, prominence and width of one pooled CCF per exposure."""
+    from decanter.wavecal.measure import parabolic_extremum
+
+    keys = ("velocity", "score", "snr", "secondary", "separation", "fwhm")
+    out = {key: np.full(score.shape[0], np.nan) for key in keys}
+    for i, row in enumerate(score):
+        good = np.isfinite(row)
+        if not np.any(good):
+            continue
+        index = int(np.nanargmax(row))
+        out["velocity"][i] = parabolic_extremum(grid, row, index)
+        out["score"][i] = row[index]
+        center = float(np.nanmedian(row))
+        scatter = float(1.4826 * np.nanmedian(np.abs(row - center)))
+        if scatter > 0:
+            out["snr"][i] = (row[index] - center) / scatter
+        # The pooled peak is broad. Step outside its wings so the runner-up is
+        # a separate maximum rather than the same peak's shoulder.
+        away = good & (np.abs(grid - out["velocity"][i]) >= wing_kms)
+        if np.any(away):
+            elsewhere = np.flatnonzero(away)
+            best = int(elsewhere[np.nanargmax(row[elsewhere])])
+            out["secondary"][i] = row[best]
+            out["separation"][i] = abs(grid[best] - out["velocity"][i])
+        half = center + 0.5 * (row[index] - center)
+        left = right = index
+        while left > 0 and np.isfinite(row[left - 1]) and row[left - 1] >= half:
+            left -= 1
+        while right + 1 < row.size and np.isfinite(row[right + 1]) and row[right + 1] >= half:
+            right += 1
+        out["fwhm"][i] = grid[right] - grid[left]
+    return out
+
+
+def _order_bootstrap(
+    evidence: NDArray, grid: NDArray, *, draws: int = 400, seed: int = 2109,
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Spread of the pooled peak when the contributing orders are resampled.
+
+    The pooled peak is an average over a modest number of orders, so its
+    uncertainty is set by how much the orders disagree rather than by the
+    photon noise within any one of them.
+    """
+    from decanter.wavecal.measure import parabolic_extremum
+
+    n_frames = evidence.shape[1] if evidence.ndim == 3 else 0
+    sigma = np.full(n_frames, np.nan)
+    low = np.full(n_frames, np.nan)
+    high = np.full(n_frames, np.nan)
+    if evidence.ndim != 3 or evidence.shape[0] < 3:
+        return sigma, low, high
+    generator = np.random.default_rng(seed)
+    for i in range(n_frames):
+        usable = np.flatnonzero(np.any(np.isfinite(evidence[:, i]), axis=1))
+        if usable.size < 3:
+            continue
+        sample = generator.choice(usable, size=(draws, usable.size), replace=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            rows = np.nanmean(evidence[sample, i], axis=1)
+        peaks = np.array([
+            parabolic_extremum(grid, row, int(np.nanargmax(row)))
+            if np.any(np.isfinite(row)) else np.nan
+            for row in rows
+        ])
+        if not np.any(np.isfinite(peaks)):
+            continue
+        sigma[i] = float(np.nanstd(peaks))
+        low[i], high[i] = (float(v) for v in np.nanpercentile(peaks, [16, 84]))
+    return sigma, low, high
+
+
+def _atmospheric_common_solution(run: Any, config: WavecalConfig) -> WavecalSolution:
+    """Measure one broad pooled telluric+OH shift for every object/sky pair.
+
+    Telluric absorption is measured in telluric-rich object orders. Strong OH
+    emission contributes from paired sky orders only where tellurics did not
+    already claim the order, matching the hybrid ladder's priority and
+    avoiding double weighting. The adjacent object and sky spectra are treated
+    as one atmospheric epoch; the fine physical solve subsequently measures
+    and corrects order-dependent residuals.
+    """
+    from decanter.wavecal.solution import WavecalSolution
+    from decanter.wavecal.measure import highpass
+    from decanter.wavecal.solve import AtmosphericCommonMode, _normalized
+
+    series = run.series
+    search = float(config.atmospheric_search_kms)
+    step = float(config.atmospheric_step_kms)
+    grid = np.arange(-search, search + 0.5 * step, step)
+    shape = (series.n_frames, grid.size)
+    telluric_pooled = np.zeros(shape, dtype=float)
+    telluric_count = np.zeros(shape, dtype=float)
+    oh_pooled = np.zeros(shape, dtype=float)
+    oh_count = np.zeros(shape, dtype=float)
+    evidence: list[NDArray] = []
+
+    accepted = np.asarray(run.telluric_accepted, dtype=bool)
+    minimum_frames = max(4, series.n_frames // 3)
+    telluric_orders = (
+        np.count_nonzero(accepted, axis=0) >= minimum_frames
+        if run.telluric_model is not None else
+        np.zeros(series.n_orders, dtype=bool)
+    )
+    used_telluric: list[int] = []
+    if run.telluric_model is not None:
+        signal = 1.0 - _normalized(series)
+        feature = 1.0 - np.asarray(run.telluric_model.native_template, dtype=float)
+        static = np.asarray([
+            _robust_location(run.telluric_velocity[accepted[:, j], j])
+            if telluric_orders[j] else np.nan
+            for j in range(series.n_orders)
+        ])
+        for j in np.flatnonzero(telluric_orders):
+            pad = int(np.ceil((abs(static[j]) + search) / series.dv_pix_kms[j]))
+            support = _dilated_support(run.telluric_support[:, j], pad)
+            if np.count_nonzero(support) < 20:
+                continue
+            velocities = static[j] + grid
+            correlation = _correlation_bank(
+                signal[:, :, j], feature[:, j], support,
+                velocities / series.dv_pix_kms[j],
+            )
+            evidence.append(
+                _add_standardized_ccf(telluric_pooled, telluric_count, correlation)
+            )
+            used_telluric.append(int(series.orders[j]))
+
+    used_oh: list[int] = []
+    if series.sky is not None and run.oh_model is not None:
+        oh_accepted = np.asarray(run.oh_accepted, dtype=bool)
+        oh_orders = ((np.count_nonzero(oh_accepted, axis=0) >= minimum_frames)
+                     & ~telluric_orders)
+        oh_signal = np.empty_like(series.sky, dtype=float)
+        oh_template = np.empty_like(run.oh_model.native_template, dtype=float)
+        for j in range(series.n_orders):
+            oh_template[:, j] = highpass(run.oh_model.native_template[:, j], 101)
+            for i in range(series.n_frames):
+                oh_signal[i, :, j] = highpass(series.sky[i, :, j], 101)
+        oh_static = np.asarray(run.oh_model.parameters[:, 1], dtype=float) * series.dv_pix_kms
+        for j in np.flatnonzero(oh_orders):
+            pad = int(np.ceil((abs(oh_static[j]) + search) / series.dv_pix_kms[j]))
+            support = _dilated_support(run.oh_model.support[:, j], pad)
+            if np.count_nonzero(support) < 20:
+                continue
+            velocities = oh_static[j] + grid
+            correlation = _correlation_bank(
+                oh_signal[:, :, j], oh_template[:, j], support,
+                velocities / series.dv_pix_kms[j],
+            )
+            evidence.append(
+                _add_standardized_ccf(oh_pooled, oh_count, correlation)
+            )
+            used_oh.append(int(series.orders[j]))
+
+    telluric_score = _pooled_score(telluric_pooled, telluric_count)
+    oh_score = _pooled_score(oh_pooled, oh_count)
+    joint_score = _pooled_score(
+        telluric_pooled + oh_pooled, telluric_count + oh_count
+    )
+    joint = _pooled_peaks(joint_score, grid)
+    common = joint["velocity"].copy()
+    if not np.all(np.isfinite(common)):
+        bad = np.flatnonzero(~np.isfinite(common))
+        raise ValueError(
+            "atmospheric pre-alignment has no pooled CCF peak for "
+            f"exposure rows {bad.tolist()}"
+        )
+    common -= _robust_location(common)
+
+    stacked = np.asarray(evidence) if evidence else np.empty((0, 0, 0))
+    sigma, p16, p84 = _order_bootstrap(stacked, grid)
+    diagnostic = AtmosphericCommonMode(
+        velocity_grid_kms=grid,
+        telluric_score=telluric_score,
+        oh_score=oh_score,
+        joint_score=joint_score,
+        peak_velocity_kms=joint["velocity"],
+        telluric_peak_velocity_kms=_pooled_peaks(telluric_score, grid)["velocity"],
+        oh_peak_velocity_kms=_pooled_peaks(oh_score, grid)["velocity"],
+        peak_snr=joint["snr"],
+        peak_score=joint["score"],
+        secondary_score=joint["secondary"],
+        secondary_separation_kms=joint["separation"],
+        fwhm_kms=joint["fwhm"],
+        bootstrap_sigma_kms=sigma,
+        bootstrap_p16_kms=p16,
+        bootstrap_p84_kms=p84,
+        common_velocity_kms=common,
+        telluric_orders=tuple(used_telluric),
+        oh_orders=tuple(used_oh),
+        search_kms=search,
+        step_kms=step,
+    )
+
+    matrix = np.repeat(common[:, None], series.n_orders, axis=1)
+    return WavecalSolution(
+        frame_ids=series.frame_ids,
+        orders=series.orders,
+        velocity=matrix,
+        source=np.full(matrix.shape, "interpolated", dtype="U16"),
+        bracketed=np.ones(matrix.shape, dtype=bool),
+        mode=run.solution.mode,
+        zero_point="relative",
+        assembly="decomposition",
+        meta={
+            "stage": "broad_pooled_telluric_oh_ccf",
+            "telluric_orders": used_telluric,
+            "oh_orders": used_oh,
+            "search_kms": search,
+            "step_kms": step,
+            "common_velocity_kms": common.tolist(),
+            "peak_score": joint["score"].tolist(),
+            "peak_snr": joint["snr"].tolist(),
+            "peak_fwhm_kms": joint["fwhm"].tolist(),
+            "bootstrap_sigma_kms": sigma.tolist(),
+            "diagnostic": diagnostic,
+        },
+    )
+
+
+def _compose_wavecal_solutions(
+    coarse: WavecalSolution, fine: WavecalSolution,
+) -> WavecalSolution:
+    """Compose two WCS velocity rescalings without approximating their sum."""
+    from decanter.wavecal.solution import C_KMS, WavecalSolution
+
+    if coarse.frame_ids != fine.frame_ids or coarse.orders != fine.orders:
+        raise ValueError("coarse and fine wavecal grids do not match")
+    scale = ((1.0 + np.asarray(coarse.velocity) / C_KMS)
+             * (1.0 + np.asarray(fine.velocity) / C_KMS))
+    combined = C_KMS * (scale - 1.0)
+    meta = dict(fine.meta)
+    meta.update({
+        "atmospheric_prealign": True,
+        "coarse_common_velocity_kms": coarse.velocity[:, 0].tolist(),
+        "fine_solution_meta": dict(fine.meta),
+    })
+    return WavecalSolution(
+        frame_ids=fine.frame_ids,
+        orders=fine.orders,
+        velocity=combined,
+        source=fine.source.copy(),
+        bracketed=fine.bracketed.copy(),
+        mode=fine.mode,
+        zero_point=fine.zero_point,
+        assembly=fine.assembly,
+        oh_tie_kms=fine.oh_tie_kms,
+        meta=meta,
+    )
 
 
 def calibrate_wavelengths(
@@ -540,12 +887,14 @@ def calibrate_wavelengths(
     verbose: bool = True,
     diagnostic_pdf: str | Path | None = None,
 ) -> TransitSeries:
-    """Layer physical telluric/OH wavecal on a WARP-aligned series.
+    """Layer physical telluric/OH wavecal on a reduced series.
 
-    ``series.shifts`` is neither replaced nor recomputed. The WARP cross-frame
-    correction stays the first calibration layer; the hybrid solver measures
-    the residual physical correction on its output and updates only the
-    wavelength WCS of each order.
+    ``series.shifts`` is neither replaced nor recomputed. Normally the hybrid
+    solver measures the residual after WARP alignment. With
+    ``config.atmospheric_prealign``, a first physical solve supplies templates
+    for a broad pooled telluric+OH CCF. Its common mode registers the spectra
+    in WCS, the atmospheric templates are rebuilt, and the fine hybrid solve
+    is repeated. This provides a no-WARP alignment path.
     """
     if series.wavecal_solution is not None:
         raise ValueError("this TransitSeries already has a physical wavecal solution")
@@ -561,12 +910,48 @@ def calibrate_wavelengths(
     cfg = cfg.resolved_for(reference.instmode)
     import inspect
 
-    run = None
-    if "return_diagnostics" in inspect.signature(solve).parameters:
-        run = solve(reference, cfg, verbose=verbose, return_diagnostics=True)
-        solution = run.solution
-    else:
-        solution = solve(reference, cfg, verbose=verbose, diagnostic_pdf=None)
+    def invoke(reference_grid):
+        if "return_diagnostics" in inspect.signature(solve).parameters:
+            solved_run = solve(
+                reference_grid, cfg, verbose=verbose, return_diagnostics=True
+            )
+            return solved_run, solved_run.solution
+        solved = solve(
+            reference_grid, cfg, verbose=verbose, diagnostic_pdf=None
+        )
+        return None, solved
+
+    run, solution = invoke(reference)
+    if cfg.atmospheric_prealign:
+        if run is None:
+            raise RuntimeError(
+                "atmospheric pre-alignment requires diagnostic wavecal measurements"
+            )
+        coarse = _atmospheric_common_solution(run, cfg)
+        if verbose:
+            common = coarse.velocity[:, 0]
+            print(
+                "  atmospheric pre-alignment: "
+                f"range {np.ptp(common) * 1e3:.0f} m/s, "
+                f"RMS {np.std(common) * 1e3:.0f} m/s; rebuilding templates",
+                flush=True,
+            )
+        from decanter.wavecal.series import frame_ids_from_reductions
+
+        frame_ids = frame_ids_from_reductions(series.reductions)
+        coarse_reductions = [
+            coarse.apply(reduction, frame_id=frame_id)
+            for reduction, frame_id in zip(
+                series.reductions, frame_ids, strict=True
+            )
+        ]
+        fine_reference = from_reductions(
+            coarse_reductions, fsr_cut=cfg.fsr_cut
+        )
+        run, fine_solution = invoke(fine_reference)
+        solution = _compose_wavecal_solutions(coarse, fine_solution)
+        if run is not None:
+            run.atmospheric = coarse.meta.get("diagnostic")
     if diagnostic_pdf is not None:
         from decanter.wavecal.report import wavecal_report_pdf
 
@@ -586,6 +971,31 @@ def calibrate_wavelengths(
         wavecal_solution=solution,
         wavecal_run=run,
     )
+
+
+#: Intermediate fields the cross-frame alignment tail reads back. Everything
+#: else in :class:`Intermediates` is 2D and is never touched again once the
+#: 1D spectra exist.
+_ALIGNMENT_INTERMEDIATES = (
+    "spectra_1d", "sky_1d", "strip_wcs", "spectra_dispcor", "sky_dispcor",
+)
+
+
+def _release_2d_intermediates(reduction: Reduction) -> Reduction:
+    """Drop the 2D intermediates a multi-frame run has finished with.
+
+    One WINERED frame holds about 306 MB of them -- nine full-detector arrays
+    plus the per-order strips -- against 0.7 MB of 1D spectra that alignment
+    actually re-reads. Keeping all of it for a 186-frame transit costs 57 GB,
+    so a series is freed frame by frame unless the caller asked to keep it.
+    """
+    inter = reduction.intermediates
+    for name in vars(inter):
+        if name in _ALIGNMENT_INTERMEDIATES:
+            continue
+        current = getattr(inter, name)
+        setattr(inter, name, {} if isinstance(current, dict) else None)
+    return reduction
 
 
 def reduce_many(
@@ -665,16 +1075,20 @@ def reduce_many(
         "save_intermediates": True,
         "shift_wave": 0.0,
     }
+    def _keep(reduction: Reduction) -> Reduction:
+        return reduction if save_intermediates else _release_2d_intermediates(reduction)
+
     if jobs == 1:
-        base = [reduce(o, calib, sky=s, **reduction_kwargs) for o, s in pairs]
+        base = [_keep(reduce(o, calib, sky=s, **reduction_kwargs)) for o, s in pairs]
     else:
-        # Resolve futures in submission order so frame ordering is stable.
+        # Resolve futures in submission order so frame ordering is stable, and
+        # free each frame as it lands rather than after the whole series is in.
         with ProcessPoolExecutor(max_workers=jobs) as pool:
             futures = [
                 pool.submit(reduce, o, calib, sky=s, **reduction_kwargs)
                 for o, s in pairs
             ]
-            base = [future.result() for future in futures]
+            base = [_keep(future.result()) for future in futures]
     n = len(base)
     if not align or n < 2:
         result = TransitSeries(reductions=base, shifts=np.zeros(n), refid=refid or 0)
