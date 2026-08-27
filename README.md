@@ -68,13 +68,6 @@ python reduce.py \
   --alignment none --wavecal auto --diagnostic-pdf
 ```
 
-The wavecal already registers every frame against HITRAN line positions, so a
-prior relative alignment is redundant. It is also not free: WARP's per-frame
-shift is one velocity per exposure, and across a transit `sin(2*pi*phi)` is
-nearly linear in time, so any smooth per-exposure shift is close to degenerate
-with the planet's `K_p`. Leaving the frames unregistered and letting the
-wavecal place them absolutely avoids trading one against the other.
-
 `--alignment warp` (the CLI default, for WARP-compatible output) and
 `--alignment atmospheric` (a pooled telluric/OH pre-registration before the
 physical solve) remain available. The atmospheric pass exists for cases where
@@ -105,12 +98,9 @@ Point Decanter at a checkout with `--serval-dir`, or `$SERVAL`; `~/mzechmeister/
 and `~/serval` are tried otherwise.
 
 `--serval-telluric-threshold` (default 0.90) masks fitted transmission below
-that value. The setting is worth attention: a shallower cut flags most of a
-water-rich order and costs whole orders to the retention floor, while masking
-nothing leaves saturated line cores to bias the RVs.
+that value.
 
-The same check runs on an already-written reduction, which is how to re-run it
-at a different threshold without repeating the reduction:
+The same check runs on an already-written reduction.
 
 ```python
 import decanter
@@ -121,36 +111,15 @@ result = decanter.run_serval_rv_stability_directory(
 print(result.exposure_rms_mps, result.figure_pdf)
 ```
 
-Products land in `<out>/serval_rv_stability/`: the figure as PDF and PNG,
-per-exposure RVs as CSV and NPZ, a JSON summary, and SERVAL's own output and
-log. The figure shows every retained exposure, two coarse time bins, and the
-scatter of the RVs binned by exposure count against the `N^-1/2` a white
-residual would follow.
-
-The summary carries `schema = "decanter.serval-rv-stability.v3"`. v3 names the
-event fields `excluded_in_event`, `event_window_time_jd_utc`,
-`event_midpoint_bjd_tdb` and `event_duration_hours`; products written before it
-use `transit_*` spellings for the same quantities.
-
 ## Transit and eclipse HRCCS
 
 Set `observation_type = "transit"` or `"eclipse"` in the TOML `[system]`
 table, along with `event_midpoint_bjd_tdb` and `event_duration_hours`. The
 same fields describe both geometries.
 
-For transmission, the signal spectra are the in-transit exposures. For an
-eclipse sequence, the planet is visible out of eclipse, so those exposures are
-the signal set and the in-eclipse spectra are excluded from the Kp--Vsys sum.
-The eclipse template is a species-presence proxy: Decanter builds the same
-isothermal equilibrium transmission calculation and reverses its line contrast.
-It carries the right opacity sources but not a dayside P--T profile, so the
-relative line strengths are not those of a true emission spectrum.
 
 `[injection].scale` multiplies only the synthetic planet used in the single
-injection-recovery experiment. It does not change the observed-data CCF,
-component selection, or null trials. This is useful for a massive, low-scale-
-height object: `scale = 10.0` asks how recoverable a ten-times-stronger line
-contrast would be while leaving the observed species test unchanged.
+injection-recovery experiment.
 
 ```bash
 decanter-hrccs examples/hrccs/bd143065b.toml
