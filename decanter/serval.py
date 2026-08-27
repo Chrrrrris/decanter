@@ -71,8 +71,8 @@ class RVStabilityResult:
     binning_rms_error_mps: np.ndarray
     binning_n_bins: np.ndarray
     binning_white_mps: np.ndarray
-    excluded_in_transit: int
-    transit_window_time_jd_utc: np.ndarray
+    excluded_in_event: int
+    event_window_time_jd_utc: np.ndarray
     product_path: Path
     table_path: Path
     figure_pdf: Path
@@ -90,8 +90,8 @@ class TransitEphemeris:
     """
 
     period_days: float
-    transit_midpoint_bjd_tdb: float
-    transit_duration_hours: float
+    event_midpoint_bjd_tdb: float
+    event_duration_hours: float
     #: Optional, and only ever used to title the figure. The frames themselves
     #: carry an OBJECT that is often the target rather than the planet, and on
     #: some nights is "UNKNOWN".
@@ -100,21 +100,21 @@ class TransitEphemeris:
 
     def __post_init__(self) -> None:
         if self.period_days <= 0:
-            raise ValueError("transit period_days must be positive")
-        if self.transit_midpoint_bjd_tdb <= 0:
-            raise ValueError("transit_midpoint_bjd_tdb must be positive")
-        if self.transit_duration_hours <= 0:
-            raise ValueError("transit_duration_hours must be positive")
+            raise ValueError("period_days must be positive")
+        if self.event_midpoint_bjd_tdb <= 0:
+            raise ValueError("event_midpoint_bjd_tdb must be positive")
+        if self.event_duration_hours <= 0:
+            raise ValueError("event_duration_hours must be positive")
         if self.observation_type not in {"transit", "eclipse"}:
             raise ValueError("observation_type must be 'transit' or 'eclipse'")
 
     @property
     def event_midpoint_bjd_tdb(self) -> float:
-        return self.transit_midpoint_bjd_tdb
+        return self.event_midpoint_bjd_tdb
 
     @property
     def event_duration_hours(self) -> float:
-        return self.transit_duration_hours
+        return self.event_duration_hours
 
     @property
     def out_of_event_abbreviation(self) -> str:
@@ -128,22 +128,16 @@ class TransitEphemeris:
             payload: dict[str, Any] = tomllib.load(stream)
         system = payload.get("system", payload)
         try:
-            midpoint = (system["event_midpoint_bjd_tdb"]
-                        if "event_midpoint_bjd_tdb" in system
-                        else system["transit_midpoint_bjd_tdb"])
-            duration = (system["event_duration_hours"]
-                        if "event_duration_hours" in system
-                        else system["transit_duration_hours"])
             return cls(
                 period_days=float(system["period_days"]),
-                transit_midpoint_bjd_tdb=float(midpoint),
-                transit_duration_hours=float(duration),
+                event_midpoint_bjd_tdb=float(system["event_midpoint_bjd_tdb"]),
+                event_duration_hours=float(system["event_duration_hours"]),
                 planet_name=str(system.get("planet_name", "")).strip(),
                 observation_type=str(system.get("observation_type", "transit")).strip(),
             )
         except KeyError as exc:
             raise ValueError(
-                f"{config_path} is missing transit ephemeris field {exc.args[0]!r}"
+                f"{config_path} is missing ephemeris field {exc.args[0]!r}"
             ) from exc
 
 
@@ -165,11 +159,8 @@ def _dilate(mask: np.ndarray, radius: int = 3) -> np.ndarray:
 
 
 #: Fitted transmission below this is masked before SERVAL sees the spectrum.
-#: Measured on TOI-3486b by scanning the whole range: too high and the mask
-#: eats the spectrum (0.5% is below the continuum noise, so 0.995 masked 80-100%
-#: of most orders and dropped 11 of 24 outright, RMS 152 m/s); too low and
-#: saturated cores bias the RVs (no masking at all gives RMS 117 m/s at 4.5x the
-#: photon error). The curve is flat from 0.80 to 0.90 and rises on both sides.
+#: A shallower cut removes most of a water-rich order and costs whole orders to
+#: the retention floor; a deeper one leaves saturated cores to bias the RVs.
 DEFAULT_TELLURIC_THRESHOLD = 0.90
 
 
@@ -218,9 +209,8 @@ def _oh_mask(wavecal_run, series: Series,
     """Map fitted OH-line support onto SERVAL's grid.
 
     The support comes from the live wavecal run when there is one, and from
-    ``oh_support.npz`` when the reduction is being read back from disk. Both
-    paths must mask the same pixels: without the product a directory-based run
-    masks no airglow at all, which on TOI-3486b cost 30% in RV scatter.
+    ``oh_support.npz`` when the reduction is read back from disk. Both paths
+    mask the same pixels; with neither, no airglow is masked.
     """
     out = np.zeros((series.n_orders, series.n_pixels), dtype=bool)
     if wavecal_run is not None and wavecal_run.oh_model is not None:
@@ -604,11 +594,10 @@ def _binning_curve(time_jd, residual, error, excluded_window=None, *,
     follows ``sigma_1 / sqrt(N)`` while the residual is white, and flattens
     above the bin size where correlated noise takes over.
 
-    Bins are filled in time order and never span the excluded transit, so a
-    bin average is always over consecutive exposures. ``N`` counts exposures
-    rather than a fixed elapsed time. Bin sizes stop once fewer than
-    ``minimum_bins`` bins remain: the RMS of a handful of bins is itself too
-    uncertain to read.
+    Bins are filled in time order and never span the excluded event, so a bin
+    average is always over consecutive exposures, and ``N`` counts exposures
+    rather than elapsed time. Bin sizes stop once fewer than ``minimum_bins``
+    bins remain, where the RMS is too uncertain to read.
 
     Returns ``(bin_size, rms, rms_error, n_bins, white)``, all indexed by bin
     size, with ``white`` the ``sqrt(N)`` expectation anchored on the measured
@@ -672,9 +661,9 @@ def _binning_curve(time_jd, residual, error, excluded_window=None, *,
 def _two_bins(time_jd, residual, error):
     """Split every usable exposure into two halves by time and average each.
 
-    The halves are the first and second half of the exposures, not the
-    pre- and post-transit blocks: the point is the scatter between two coarse
-    time bins over the whole run, whatever the transit did.
+    The halves are the first and second half of the exposure sequence, not the
+    pre- and post-event blocks, so the pair measures the scatter between two
+    coarse time bins over the whole run.
     """
     good = np.isfinite(time_jd) & np.isfinite(residual)
     order = np.argsort(np.asarray(time_jd)[good])
@@ -713,19 +702,19 @@ def _event_selection(
     bjd_tdb = np.asarray(bjd_tdb, dtype=float)
     time_jd_utc = np.asarray(time_jd_utc, dtype=float)
     phase_days = (
-        (bjd_tdb - ephemeris.transit_midpoint_bjd_tdb + 0.5 * ephemeris.period_days)
+        (bjd_tdb - ephemeris.event_midpoint_bjd_tdb + 0.5 * ephemeris.period_days)
         % ephemeris.period_days
         - 0.5 * ephemeris.period_days
     )
-    half_duration_days = 0.5 * ephemeris.transit_duration_hours / 24.0
+    half_duration_days = 0.5 * ephemeris.event_duration_hours / 24.0
     in_transit = np.abs(phase_days) <= half_duration_days
 
     cycle = int(np.rint(
-        (np.nanmedian(bjd_tdb) - ephemeris.transit_midpoint_bjd_tdb)
+        (np.nanmedian(bjd_tdb) - ephemeris.event_midpoint_bjd_tdb)
         / ephemeris.period_days
     ))
     observed_midpoint_bjd = (
-        ephemeris.transit_midpoint_bjd_tdb + cycle * ephemeris.period_days
+        ephemeris.event_midpoint_bjd_tdb + cycle * ephemeris.period_days
     )
     # The barycentric light-time offset changes negligibly across one night.
     # Its measured median maps the BJD transit window onto the UTC plot axis.
@@ -737,29 +726,20 @@ def _event_selection(
     return in_transit, window_utc
 
 
-# Compatibility for notebooks and external callers written before eclipse
-# support. The calculation itself is now event-generic.
-_transit_selection = _event_selection
-
 
 def _uncontaminated_exposures(
     in_event: np.ndarray, observation_type: str,
 ) -> tuple[np.ndarray, str, str]:
     """Select the exposures whose stellar spectrum the planet is absent from.
 
-    The two geometries are opposites, so they are written out separately
-    rather than as one expression with a sign:
-
     transit
-        While the planet crosses the disc it imprints its transmission
-        signature on the stellar lines and the Rossiter-McLaughlin effect
-        distorts their shape. The in-event exposures are the contaminated
-        ones.
+        The planet imprints its transmission signature on the stellar lines
+        while it crosses the disc, and Rossiter-McLaughlin distorts their
+        shape, so the in-event exposures are the contaminated ones.
     eclipse
-        The planet's dayside emission is superposed on the stellar spectrum
-        whenever the dayside is visible, Doppler-shifted by its own orbital
-        motion. It is hidden only during the eclipse, so the in-event
-        exposures are the only clean ones.
+        The dayside emission is superposed on the stellar spectrum whenever
+        the dayside is visible. It is hidden only during the eclipse, so the
+        in-event exposures are the clean ones.
 
     Returns ``(keep, used_label, dropped_label)``.
     """
@@ -824,8 +804,8 @@ def _retain_usable_orders(
 def _save_products(output: Path, target: str, mode: str, series: Series,
                    time_jd, bjd, berv, rv, error, residual,
                    bin_time, bin_value, bin_error, bin_count,
-                   binning, ephemeris: TransitEphemeris, excluded_in_transit: int,
-                   transit_window_time_jd_utc: np.ndarray):
+                   binning, ephemeris: TransitEphemeris, excluded_in_event: int,
+                   event_window_time_jd_utc: np.ndarray):
     bin_size, binned_rms, binned_rms_error, binned_n, white = binning
     exposure_rms = float(np.nanstd(residual))
     exposure_mad = robust_scatter(residual)
@@ -845,14 +825,10 @@ def _save_products(output: Path, target: str, mode: str, series: Series,
         exposure_rms_mps=np.asarray(exposure_rms),
         exposure_mad_mps=np.asarray(exposure_mad),
         two_bin_rms_mps=np.asarray(two_bin_rms), two_bin_mad_mps=np.asarray(two_bin_mad),
-        excluded_in_transit=np.asarray(excluded_in_transit, dtype=np.int32),
-        transit_window_time_jd_utc=transit_window_time_jd_utc,
         observation_type=np.asarray(ephemeris.observation_type),
-        excluded_in_event=np.asarray(excluded_in_transit, dtype=np.int32),
-        event_window_time_jd_utc=transit_window_time_jd_utc,
+        excluded_in_event=np.asarray(excluded_in_event, dtype=np.int32),
+        event_window_time_jd_utc=event_window_time_jd_utc,
         period_days=np.asarray(ephemeris.period_days),
-        transit_midpoint_bjd_tdb=np.asarray(ephemeris.transit_midpoint_bjd_tdb),
-        transit_duration_hours=np.asarray(ephemeris.transit_duration_hours),
         event_midpoint_bjd_tdb=np.asarray(ephemeris.event_midpoint_bjd_tdb),
         event_duration_hours=np.asarray(ephemeris.event_duration_hours),
     )
@@ -871,17 +847,16 @@ def _save_products(output: Path, target: str, mode: str, series: Series,
                 "observation_centered_rv_mps": residual[index],
             })
     summary = {
-        "schema": "decanter.serval-rv-stability.v2", "target": target,
+        "schema": "decanter.serval-rv-stability.v3", "target": target,
         "wavecal_mode": mode, "n_exposures": int(np.count_nonzero(np.isfinite(rv))),
         "orders": [int(order) for order in series.orders],
         "observation_type": ephemeris.observation_type,
-        "excluded_in_event": int(excluded_in_transit),
-        "excluded_in_transit": int(excluded_in_transit),
+        "excluded_in_event": int(excluded_in_event),
         "event_midpoint_bjd_tdb": ephemeris.event_midpoint_bjd_tdb,
         "event_duration_hours": ephemeris.event_duration_hours,
         "period_days": ephemeris.period_days,
-        "transit_midpoint_bjd_tdb": ephemeris.transit_midpoint_bjd_tdb,
-        "transit_duration_hours": ephemeris.transit_duration_hours,
+        "event_midpoint_bjd_tdb": ephemeris.event_midpoint_bjd_tdb,
+        "event_duration_hours": ephemeris.event_duration_hours,
         "exposure_rms_mps": exposure_rms,
         "exposure_mad_mps": exposure_mad, "two_bin_rms_mps": two_bin_rms,
         "two_bin_mad_mps": two_bin_mad,
@@ -904,8 +879,8 @@ def _save_products(output: Path, target: str, mode: str, series: Series,
 
 def _plot(output: Path, name: str, time_jd, residual, error,
           bin_time, bin_value, bin_error, binning, exposure_rms, exposure_mad,
-          two_bin_rms, two_bin_mad, transit_window_time_jd_utc,
-          excluded_in_transit, observation_type="transit") -> tuple[Path, Path]:
+          two_bin_rms, two_bin_mad, event_window_time_jd_utc,
+          excluded_in_event, observation_type="transit") -> tuple[Path, Path]:
     """Write the RV-stability figure. ``name`` titles it and nothing else."""
     matplotlib_cache = Path(tempfile.gettempdir()) / "decanter_matplotlib_cache"
     matplotlib_cache.mkdir(exist_ok=True)
@@ -919,16 +894,15 @@ def _plot(output: Path, name: str, time_jd, residual, error,
         gridspec_kw={"width_ratios": [2.4, 1.0]},
     )
     window = Time(
-        np.asarray(transit_window_time_jd_utc), format="jd"
+        np.asarray(event_window_time_jd_utc), format="jd"
     ).to_datetime()
-    # The span always marks the event. Which side of it was kept is the
-    # opposite for the two geometries, so the label has to say which.
+    # The span marks the event; the retained side of it differs by geometry.
     eclipse = observation_type == "eclipse"
     axis.axvspan(
         window[0], window[1], color="0.88", alpha=0.75, lw=0,
-        label=(f"eclipse — planet hidden, the {excluded_in_transit} exposures "
+        label=(f"eclipse — planet hidden, the {excluded_in_event} exposures "
                "outside it are excluded" if eclipse else
-               f"transit excluded ({excluded_in_transit} exposures)"),
+               f"transit excluded ({excluded_in_event} exposures)"),
         zorder=0,
     )
     good = np.isfinite(time_jd) & np.isfinite(residual)
@@ -1065,20 +1039,20 @@ def _run(series: Series, output_root: str | Path, wavecal_mode: str, *,
     output = output_root / "serval_rv_stability"
     output.mkdir(parents=True, exist_ok=True)
     all_times, all_bjd, all_berv, all_coordinates = _frame_coordinates(series)
-    in_transit, transit_window_time_jd_utc = _event_selection(
+    in_transit, event_window_time_jd_utc = _event_selection(
         all_bjd, series.time_jd, ephemeris
     )
     keep, used, dropped = _uncontaminated_exposures(
         in_transit, ephemeris.observation_type
     )
-    excluded_in_transit = int(np.count_nonzero(~keep))
+    excluded_in_event = int(np.count_nonzero(~keep))
     if np.count_nonzero(keep) < 4:
         raise ValueError(
             f"SERVAL RV stability requires at least four {used} exposures; "
             f"this observation has {int(np.count_nonzero(keep))}"
         )
     print(
-        f"SERVAL: excluding {excluded_in_transit} {dropped} exposures; "
+        f"SERVAL: excluding {excluded_in_event} {dropped} exposures; "
         f"using {int(np.count_nonzero(keep))} {used}",
         flush=True,
     )
@@ -1121,7 +1095,7 @@ def _run(series: Series, output_root: str | Path, wavecal_mode: str, *,
     residual = rv - np.nanmedian(rv)
     bin_time, bin_value, bin_error, bin_count = _two_bins(time_jd, residual, error)
     binning = _binning_curve(
-        time_jd, residual, error, transit_window_time_jd_utc
+        time_jd, residual, error, event_window_time_jd_utc
     )
     target = _safe_target(series)
     if target.upper() in {"UNKNOWN", "TARGET"} and target_hint:
@@ -1130,22 +1104,19 @@ def _run(series: Series, output_root: str | Path, wavecal_mode: str, *,
      two_bin_rms, two_bin_mad) = _save_products(
         output, target, wavecal_mode, series, time_jd, bjd, berv, rv, error, residual,
         bin_time, bin_value, bin_error, bin_count, binning, ephemeris,
-        excluded_in_transit, transit_window_time_jd_utc,
+        excluded_in_event, event_window_time_jd_utc,
     )
     pdf, png = _plot(
         output, ephemeris.planet_name or target, time_jd, residual, error,
         bin_time, bin_value, bin_error, binning, exposure_rms, exposure_mad,
-        two_bin_rms, two_bin_mad, transit_window_time_jd_utc,
-        excluded_in_transit, ephemeris.observation_type,
+        two_bin_rms, two_bin_mad, event_window_time_jd_utc,
+        excluded_in_event, ephemeris.observation_type,
     )
     print(
         f"SERVAL RV stability: RMS={exposure_rms:.1f} m/s, "
         f"MADsigma={exposure_mad:.1f} m/s; PDF -> {pdf}", flush=True,
     )
     bin_size, binned_rms, binned_rms_error, binned_n, white = binning
-    # Named rather than positional: twenty-six fields of mostly same-typed
-    # arrays, where a misordered pair would be silently wrong rather than an
-    # error.
     return RVStabilityResult(
         target=target, wavecal_mode=wavecal_mode, orders=series.orders,
         time_jd_utc=time_jd, bjd_tdb=bjd, berv_kms=berv, rv_mps=rv,
@@ -1156,8 +1127,8 @@ def _run(series: Series, output_root: str | Path, wavecal_mode: str, *,
         two_bin_mad_mps=two_bin_mad, binning_bin_size=bin_size,
         binning_rms_mps=binned_rms, binning_rms_error_mps=binned_rms_error,
         binning_n_bins=binned_n, binning_white_mps=white,
-        excluded_in_transit=excluded_in_transit,
-        transit_window_time_jd_utc=transit_window_time_jd_utc,
+        excluded_in_event=excluded_in_event,
+        event_window_time_jd_utc=event_window_time_jd_utc,
         product_path=product_path, table_path=table_path,
         figure_pdf=pdf, figure_png=png, log_path=log_path,
     )

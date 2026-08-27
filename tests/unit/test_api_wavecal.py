@@ -54,9 +54,9 @@ def test_physical_wavecal_is_applied_after_and_preserves_warp_shifts(monkeypatch
 
     solve_module = importlib.import_module("decanter.wavecal.solve")
 
-    def fake_solve(reference, config, *, verbose, diagnostic_pdf):
+    def fake_solve(reference, config, *, verbose, return_diagnostics):
         shape = (reference.n_frames, reference.n_orders)
-        return decanter.WavecalSolution(
+        solution = decanter.WavecalSolution(
             frame_ids=reference.frame_ids,
             orders=reference.orders,
             velocity=np.full(shape, 1.5),
@@ -64,6 +64,7 @@ def test_physical_wavecal_is_applied_after_and_preserves_warp_shifts(monkeypatch
             bracketed=np.ones(shape, dtype=bool),
             mode=config.mode,
         )
+        return SimpleNamespace(solution=solution, telluric_model=None, oh_model=None)
 
     monkeypatch.setattr(solve_module, "solve", fake_solve)
 
@@ -91,9 +92,9 @@ def test_physical_wavecal_preserves_repeated_object_sky_pairs(monkeypatch, tmp_p
     )
     solve_module = importlib.import_module("decanter.wavecal.solve")
 
-    def fake_solve(reference, config, *, verbose, diagnostic_pdf):
+    def fake_solve(reference, config, *, verbose, return_diagnostics):
         velocity = np.repeat(np.array([[1.0], [2.0]]), reference.n_orders, axis=1)
-        return decanter.WavecalSolution(
+        solution = decanter.WavecalSolution(
             frame_ids=reference.frame_ids,
             orders=reference.orders,
             velocity=velocity,
@@ -101,6 +102,7 @@ def test_physical_wavecal_preserves_repeated_object_sky_pairs(monkeypatch, tmp_p
             bracketed=np.ones(velocity.shape, dtype=bool),
             mode=config.mode,
         )
+        return SimpleNamespace(solution=solution, telluric_model=None, oh_model=None)
 
     monkeypatch.setattr(solve_module, "solve", fake_solve)
 
@@ -551,7 +553,7 @@ def test_report_gains_the_pooled_ccf_pages(tmp_path: Path) -> None:
 
 
 def test_series_reduction_frees_its_two_dimensional_intermediates() -> None:
-    """A 186-frame transit cannot hold 306 MB of 2D arrays per frame."""
+    """The alignment tail keeps its 1D inputs; the 2D arrays are released."""
     from decanter._reduction import Intermediates
 
     reduction = _reduction("WINA00000001", 1)

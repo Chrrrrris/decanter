@@ -31,9 +31,9 @@ from decanter.wavecal.measure import (
     continuum_normalize, highpass, measure_series_shifts, robust_scatter,
 )
 from decanter.wavecal.opacity import series_tau
-from decanter.wavecal.solution import C_KMS, WavecalSolution
+from decanter.wavecal.solution import WavecalSolution
 from decanter.wavecal.telluric import (
-    KERNEL_RADIUS, fit_templates, lsf_kernel_numpy, transmission_numpy,
+    KERNEL_RADIUS, fit_templates, lsf_kernel_numpy,
 )
 
 
@@ -41,31 +41,29 @@ from decanter.wavecal.telluric import (
 class AtmosphericCommonMode:
     """The pooled telluric+OH CCF behind the common-mode pre-alignment.
 
-    The first calibration iteration correlates every line-rich order against
-    its own template over one broad velocity grid, standardises each order's
-    CCF and averages them. The peak of that pooled curve is the common-mode
-    shift of the exposure. This holds the pooled curves and their peak
-    statistics so the report can show what the peak was measured from.
+    Every line-rich order is correlated against its own template over one
+    broad velocity grid; the per-order CCFs are standardised and averaged, and
+    the peak of the pooled curve is the exposure's common-mode shift. The
+    curves and their peak statistics are kept here for the report.
 
     Attributes:
         velocity_grid_kms: ``(n_grid,)`` trial velocities, relative to each
             order's own static offset.
         telluric_score / oh_score / joint_score: ``(n_frames, n_grid)`` pooled
-            standardised CCFs. The joint curve is what the peak is taken from;
-            the two single-tracer curves exist to be compared with each other.
+            standardised CCFs. The peak is taken from the joint curve; the
+            single-tracer curves are kept for comparison.
         peak_velocity_kms: ``(n_frames,)`` joint peak, before the series zero
             point is removed.
-        telluric_peak_velocity_kms / oh_peak_velocity_kms: the same peak
-            measured from one tracer alone. Their difference is an independent
-            check on the joint value.
+        telluric_peak_velocity_kms / oh_peak_velocity_kms: the same peak from
+            one tracer alone; their difference checks the joint value.
         peak_snr: joint peak height over the MAD of its own curve.
         peak_score / secondary_score / secondary_separation_kms: the peak, the
             best maximum outside its wings, and how far away that one sits.
         fwhm_kms: full width of the joint peak at half its height.
         bootstrap_sigma_kms / bootstrap_p16_kms / bootstrap_p84_kms: spread of
             the joint peak when the contributing orders are resampled.
-        common_velocity_kms: what was actually applied, i.e. the joint peak
-            with the series zero point removed.
+        common_velocity_kms: the applied shift, i.e. the joint peak with the
+            series zero point removed.
         telluric_orders / oh_orders: the orders each tracer contributed.
     """
 

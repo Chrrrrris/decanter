@@ -98,8 +98,8 @@ def test_default_search_grids_and_local_window():
         input=InputConfig("products"),
         system=SystemConfig(
             period_days=1.0,
-            transit_midpoint_bjd_tdb=2_460_000.0,
-            transit_duration_hours=2.0,
+            event_midpoint_bjd_tdb=2_460_000.0,
+            event_duration_hours=2.0,
             expected_kp_kms=200.0,
         ),
     )
@@ -119,8 +119,8 @@ def test_search_grid_steps_must_be_positive():
         input=InputConfig("products"),
         system=SystemConfig(
             period_days=1.0,
-            transit_midpoint_bjd_tdb=2_460_000.0,
-            transit_duration_hours=2.0,
+            event_midpoint_bjd_tdb=2_460_000.0,
+            event_duration_hours=2.0,
             expected_kp_kms=200.0,
         ),
     )
@@ -138,11 +138,11 @@ def test_notebook_reduction_configuration_is_valid():
     config = HRCCSConfig(
         input=InputConfig("products"),
         system=SystemConfig(
-            period_days=1.0, transit_midpoint_bjd_tdb=2_460_000.0,
-            transit_duration_hours=2.0, expected_kp_kms=200.0,
+            period_days=1.0, event_midpoint_bjd_tdb=2_460_000.0,
+            event_duration_hours=2.0, expected_kp_kms=200.0,
         ),
         reduction=ReductionConfig(
-            telluric_mask_scope="in_transit", edge_trim_pixels=0,
+            telluric_mask_scope="signal", edge_trim_pixels=0,
             ccf_lsf_margin_widths=3.0,
         ),
     )
@@ -417,26 +417,12 @@ def _config_text(observation_type: str, scope: str) -> str:
     )
 
 
-def test_transit_only_mask_alias_is_rejected_for_an_eclipse(tmp_path) -> None:
-    """On an eclipse, "in_transit" would select out-of-eclipse exposures.
-
-    The alias resolves to the signal exposures, which is right for a transit
-    and the opposite of what the name says for an eclipse.
-    """
-    path = tmp_path / "eclipse.toml"
-    path.write_text(_config_text("eclipse", "in_transit"))
-
-    with pytest.raises(ValueError, match="transit-only alias"):
-        load_config(path)
-
-
-def test_transit_only_mask_alias_still_works_for_a_transit(tmp_path) -> None:
-    path = tmp_path / "transit.toml"
+def test_unknown_mask_scope_is_rejected(tmp_path) -> None:
+    path = tmp_path / "bad.toml"
     path.write_text(_config_text("transit", "in_transit"))
 
-    config = load_config(path)
-
-    assert config.reduction.telluric_mask_scope == "in_transit"
+    with pytest.raises(ValueError, match="telluric_mask_scope must be"):
+        load_config(path)
 
 
 def test_signal_scope_is_accepted_for_both_geometries(tmp_path) -> None:

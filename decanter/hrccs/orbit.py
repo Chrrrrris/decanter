@@ -21,7 +21,6 @@ class Orbit:
     signal_mask: np.ndarray
     signal_weight: np.ndarray
     velocity_basis: np.ndarray
-    velocity_sign: float
     observation_type: str
     berv_kms: np.ndarray
 
@@ -157,11 +156,10 @@ def build_orbit(system, time_jd_utc, metadata, cache_dir: str | Path) -> Orbit:
     is_eclipse = system.observation_type == "eclipse"
     signal_mask = ~event_mask if is_eclipse else event_mask
     weight = signal_mask.astype(float)
-    velocity_sign = -1.0 if is_eclipse else 1.0
     velocity_basis = _orbital_velocity_basis(
         phase, system.observation_type, system.eccentricity,
         system.argument_of_periastron_deg,
     )
     return Orbit(name, float(ra), float(dec), float(stellar_rv), bjd, phase,
-                 event_mask, signal_mask, weight, velocity_basis, velocity_sign,
+                 event_mask, signal_mask, weight, velocity_basis,
                  system.observation_type, np.asarray(berv, dtype=float))

@@ -35,7 +35,7 @@ def _mask(cube, config, rv_grid, event_mask, signal_mask, resolving_power):
                       RuntimeWarning, stacklevel=2)
     else:
         scope = config.telluric_mask_scope
-        if scope in {"signal", "in_transit"}:
+        if scope == "signal":
             rows = np.asarray(signal_mask, dtype=bool)
         elif scope == "event":
             rows = np.asarray(event_mask, dtype=bool)
@@ -141,7 +141,6 @@ def run(config):
             config.injection.null_realizations,
             wide_wavelength_um=wide_template.wavelength_um,
             wide_template=wide_signal,
-            velocity_sign=orbit.velocity_sign,
             velocity_basis=orbit.velocity_basis,
             # A transit's star-only reference is OOT; an eclipse's star-only
             # reference is the in-eclipse spectrum with the planet hidden.

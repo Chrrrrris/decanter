@@ -16,7 +16,6 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import median_filter, percentile_filter
 
-from decanter.wavecal.solution import C_KMS
 
 
 def robust_scatter(values: NDArray | list) -> float:

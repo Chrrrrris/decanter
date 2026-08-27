@@ -2,10 +2,10 @@ output_dir = "hrccs_output/wasp193b"
 show_progress = true
 
 [input]
-decanter_dir = "../outputs/decanter_iterative/wasp193b"
+decanter_dir = "../outputs/decanter_final/wasp193b"
 
 [system]
-# Yee et al. (2025, AJ 169, 225), matching the local WASP-193b notebook.
+# Yee et al. (2025, AJ 169, 225)
 planet_name = "WASP-193 b"
 observation_type = "transit"
 period_days = 6.2463475
@@ -22,7 +22,6 @@ equilibrium_temperature_k = 1250.0
 metallicity_dex = -0.108
 
 [atmosphere]
-# Start with H2O; add supported HITRAN molecules or Kurucz atomic species.
 species = ["H2O", "CrH", "FeH"]
 cloud_top_pressure_bar = 0.03
 cache_dir = "~/.cache/decanter/hrccs"

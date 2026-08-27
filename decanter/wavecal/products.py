@@ -96,9 +96,6 @@ def airglow_product(run, path: str | Path) -> Path | None:
     flags so airglow residuals do not enter the stellar RV. It lives on the
     wavecal reference grid rather than per exposure, because the fit is made
     against the time-median sky.
-
-    Without this product a reduction read back from disk has no way to know
-    where the sky lines were, and masks none of them.
     """
     model = run.oh_model
     if model is None:

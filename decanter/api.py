@@ -201,7 +201,7 @@ def reduce(
     static_bp, _ = _fits.read_image(calib.static_bp_mask)
     flat, _ = _fits.read_image(calib.flat)
 
-    inter = Intermediates() if save_intermediates else Intermediates()
+    inter = Intermediates()
     if save_intermediates:
         inter.obj_raw = obj_data
 
@@ -910,18 +910,12 @@ def calibrate_wavelengths(
     cfg = config or WavecalConfig()
     reference = from_reductions(series.reductions, fsr_cut=cfg.fsr_cut)
     cfg = cfg.resolved_for(reference.instmode)
-    import inspect
 
     def invoke(reference_grid):
-        if "return_diagnostics" in inspect.signature(solve).parameters:
-            solved_run = solve(
-                reference_grid, cfg, verbose=verbose, return_diagnostics=True
-            )
-            return solved_run, solved_run.solution
-        solved = solve(
-            reference_grid, cfg, verbose=verbose, diagnostic_pdf=None
+        solved_run = solve(
+            reference_grid, cfg, verbose=verbose, return_diagnostics=True
         )
-        return None, solved
+        return solved_run, solved_run.solution
 
     run, solution = invoke(reference)
     if cfg.atmospheric_prealign:
@@ -975,9 +969,8 @@ def calibrate_wavelengths(
     )
 
 
-#: Intermediate fields the cross-frame alignment tail reads back. Everything
-#: else in :class:`Intermediates` is 2D and is never touched again once the
-#: 1D spectra exist.
+#: Intermediate fields the cross-frame alignment tail reads back. The rest of
+#: :class:`Intermediates` is 2D and unused once the 1D spectra exist.
 _ALIGNMENT_INTERMEDIATES = (
     "spectra_1d", "sky_1d", "strip_wcs", "spectra_dispcor", "sky_dispcor",
 )
@@ -986,10 +979,9 @@ _ALIGNMENT_INTERMEDIATES = (
 def _release_2d_intermediates(reduction: Reduction) -> Reduction:
     """Drop the 2D intermediates a multi-frame run has finished with.
 
-    One WINERED frame holds about 306 MB of them -- nine full-detector arrays
-    plus the per-order strips -- against 0.7 MB of 1D spectra that alignment
-    actually re-reads. Keeping all of it for a 186-frame transit costs 57 GB,
-    so a series is freed frame by frame unless the caller asked to keep it.
+    One frame holds ~300 MB of them, nine full-detector arrays plus the
+    per-order strips, against ~1 MB of 1D spectra the alignment tail re-reads.
+    A series is freed frame by frame unless the caller asked to keep it.
     """
     inter = reduction.intermediates
     for name in vars(inter):
@@ -1171,9 +1163,8 @@ def combine(
         if same_grid:
             F = np.array([np.asarray(spec.flux[:L], float) for spec in specs])
         else:
-            # A per-frame physical wavecal changes the WCS without touching
-            # flux. Regrid those spectra exactly once, here at combination,
-            # instead of silently averaging different physical wavelengths.
+            # A per-frame wavecal changes the WCS without touching flux, so
+            # the frames sit on different wavelength grids. Regrid once here.
             target_wave = np.asarray(ref.wavelength[:L], dtype=float)
             rows = []
             for spec in specs:

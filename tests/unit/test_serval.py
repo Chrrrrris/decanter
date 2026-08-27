@@ -17,8 +17,8 @@ from decanter.serval import (
     _match_serval_rows,
     _retain_usable_orders,
     _telluric_mask,
-    _transit_selection,
     _binning_curve,
+    _event_selection,
     _two_bins,
     robust_scatter,
     run_serval_rv_stability,
@@ -80,16 +80,16 @@ def test_complete_serval_table_matches_in_order_with_duplicate_bjd() -> None:
     np.testing.assert_array_equal(rows, [0, 1, 2])
 
 
-def test_transit_selection_uses_periodic_bjd_ephemeris() -> None:
+def test_event_selection_uses_periodic_bjd_ephemeris() -> None:
     ephemeris = TransitEphemeris(
         period_days=2.0,
-        transit_midpoint_bjd_tdb=2_460_000.0,
-        transit_duration_hours=2.0,
+        event_midpoint_bjd_tdb=2_460_000.0,
+        event_duration_hours=2.0,
     )
     bjd = np.asarray([2_460_001.94, 2_460_001.97, 2_460_002.00,
                       2_460_002.03, 2_460_002.06])
     utc = bjd - 0.003
-    in_transit, window = _transit_selection(bjd, utc, ephemeris)
+    in_transit, window = _event_selection(bjd, utc, ephemeris)
     np.testing.assert_array_equal(in_transit, [False, True, True, True, False])
     np.testing.assert_allclose(
         window,
@@ -100,12 +100,12 @@ def test_transit_selection_uses_periodic_bjd_ephemeris() -> None:
 def test_ephemeris_reads_hrccs_system_table(tmp_path) -> None:
     path = tmp_path / "target.toml"
     path.write_text(
-        "[system]\nperiod_days=3.0\ntransit_midpoint_bjd_tdb=2459000.0\n"
-        "transit_duration_hours=2.5\n"
+        "[system]\nperiod_days=3.0\nevent_midpoint_bjd_tdb=2459000.0\n"
+        "event_duration_hours=2.5\n"
     )
     ephemeris = TransitEphemeris.from_toml(path)
     assert ephemeris.period_days == 3.0
-    assert ephemeris.transit_duration_hours == 2.5
+    assert ephemeris.event_duration_hours == 2.5
 
 
 def test_eclipse_ephemeris_reads_generic_event_fields(tmp_path) -> None:
@@ -215,9 +215,8 @@ def test_binning_curve_follows_root_n_for_white_noise() -> None:
     np.testing.assert_allclose(rms[0], np.std(residual, ddof=1))
     np.testing.assert_allclose(white, rms[0] / np.sqrt(size))
     assert np.all(n_bins >= 4)
-    # A binned RMS carries its own scatter of 1/sqrt(2(M-1)), so the tail of
-    # the curve wanders by tens of percent however white the data is. Where
-    # the bins are numerous the curve sits on the sqrt(N) line.
+    # A binned RMS carries its own scatter of 1/sqrt(2(M-1)), so only the
+    # well-sampled part of the curve is pinned to the sqrt(N) line.
     ratio = rms / white
     well_sampled = n_bins >= 20
     assert 0.94 < float(np.median(ratio[well_sampled])) < 1.06
@@ -283,11 +282,7 @@ def _oh_run(series: Series) -> SimpleNamespace:
 
 
 def test_oh_mask_from_a_live_run_and_from_the_product_agree(tmp_path) -> None:
-    """A reduction read back from disk must mask the same airglow pixels.
-
-    Without the product the directory entry point masked no OH at all, which
-    is a silent 30% loss of RV stability rather than an error.
-    """
+    """A reduction read back from disk masks the same airglow pixels."""
     from decanter.serval import _oh_mask
     from decanter.wavecal.products import airglow_product
 
@@ -339,8 +334,8 @@ def test_ephemeris_carries_the_planet_name_for_the_figure_title(tmp_path) -> Non
         "[system]\n"
         'planet_name = "WASP-69 b"\n'
         "period_days = 3.8681382\n"
-        "transit_midpoint_bjd_tdb = 2455748.83344\n"
-        "transit_duration_hours = 2.1792\n"
+        "event_midpoint_bjd_tdb = 2455748.83344\n"
+        "event_duration_hours = 2.1792\n"
     )
 
     ephemeris = TransitEphemeris.from_toml(config)
@@ -353,8 +348,8 @@ def test_ephemeris_without_a_planet_name_is_still_valid(tmp_path) -> None:
     config.write_text(
         "[system]\n"
         "period_days = 3.8681382\n"
-        "transit_midpoint_bjd_tdb = 2455748.83344\n"
-        "transit_duration_hours = 2.1792\n"
+        "event_midpoint_bjd_tdb = 2455748.83344\n"
+        "event_duration_hours = 2.1792\n"
     )
 
     ephemeris = TransitEphemeris.from_toml(config)
@@ -365,19 +360,14 @@ def test_ephemeris_without_a_planet_name_is_still_valid(tmp_path) -> None:
 def _ephemeris(observation_type: str) -> TransitEphemeris:
     return TransitEphemeris(
         period_days=2.0,
-        transit_midpoint_bjd_tdb=2460000.0,
-        transit_duration_hours=2.4,
+        event_midpoint_bjd_tdb=2460000.0,
+        event_duration_hours=2.4,
         observation_type=observation_type,
     )
 
 
 def test_eclipse_keeps_the_exposures_where_the_planet_is_hidden() -> None:
-    """Emission contaminates the star whenever the dayside is visible.
-
-    A transit imprints the planet on the stellar lines while it crosses the
-    disc, so the in-event exposures are the bad ones. An eclipse hides the
-    planet, so those are the only clean ones -- the selection inverts.
-    """
+    """A transit contaminates the in-event exposures, an eclipse the rest."""
     from decanter.serval import _event_selection, _uncontaminated_exposures
 
     # Six exposures inside a 2.4 h event centred on the midpoint, six outside.

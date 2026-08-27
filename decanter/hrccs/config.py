@@ -33,12 +33,8 @@ class SystemConfig:
     planet_name: str | None = None
     observation_type: str = "transit"
     period_days: float = 0.0
-    event_midpoint_bjd_tdb: float | None = None
-    event_duration_hours: float | None = None
-    # Backward-compatible transit names. New configurations should use the
-    # generic event fields above so the same schema works for eclipses.
-    transit_midpoint_bjd_tdb: float = 0.0
-    transit_duration_hours: float = 0.0
+    event_midpoint_bjd_tdb: float = 0.0
+    event_duration_hours: float = 0.0
     expected_kp_kms: float = 0.0
     eccentricity: float = 0.0
     argument_of_periastron_deg: float = 90.0
@@ -57,15 +53,11 @@ class SystemConfig:
 
     @property
     def event_midpoint(self) -> float:
-        return (float(self.event_midpoint_bjd_tdb)
-                if self.event_midpoint_bjd_tdb is not None
-                else float(self.transit_midpoint_bjd_tdb))
+        return float(self.event_midpoint_bjd_tdb)
 
     @property
     def event_duration(self) -> float:
-        return (float(self.event_duration_hours)
-                if self.event_duration_hours is not None
-                else float(self.transit_duration_hours))
+        return float(self.event_duration_hours)
 
 
 @dataclass(frozen=True)
@@ -133,12 +125,10 @@ class ReductionConfig:
     # The reduction reproduces the minimal-processing WASP-69b reference:
     # linear-flux SVD and exact injected-template SVD refitting.
     telluric_threshold: float = 0.90
-    # Which exposures the telluric minimum is taken over. "signal" is the
-    # ones being cross-correlated: in transit for transmission, out of eclipse
-    # for emission. "event"/"out_of_event" name the geometry directly, and
-    # "all" uses every exposure. "in_transit" is a pre-eclipse alias for
-    # "signal", accepted only for transit configurations -- on an eclipse it
-    # would select out-of-eclipse exposures, which is not what it says.
+    # Which exposures the telluric minimum is taken over. "signal" is the ones
+    # being cross-correlated: in transit for transmission, out of eclipse for
+    # emission. "event"/"out_of_event" name the geometry directly and "all"
+    # uses every exposure.
     telluric_mask_scope: str = "signal"
     edge_trim_pixels: int = 0
     ccf_lsf_margin_widths: float = 3.0
@@ -229,19 +219,10 @@ class HRCCSConfig:
         if not 0.0 < self.reduction.telluric_threshold <= 1.0:
             raise ValueError("telluric_threshold must be in (0, 1]")
         if self.reduction.telluric_mask_scope not in {
-            "all", "signal", "event", "out_of_event", "in_transit"
+            "all", "signal", "event", "out_of_event"
         }:
             raise ValueError(
-                "telluric_mask_scope must be all, signal, event, out_of_event, "
-                "or the transit-only alias in_transit"
-            )
-        if (self.reduction.telluric_mask_scope == "in_transit"
-                and self.system.observation_type == "eclipse"):
-            raise ValueError(
-                "telluric_mask_scope 'in_transit' is a transit-only alias and "
-                "would select out-of-eclipse exposures here; use 'signal' for "
-                "the exposures being cross-correlated, or name the geometry "
-                "with 'event' / 'out_of_event'"
+                "telluric_mask_scope must be all, signal, event, or out_of_event"
             )
         if self.reduction.edge_trim_pixels < 0:
             raise ValueError("edge_trim_pixels must be non-negative")
